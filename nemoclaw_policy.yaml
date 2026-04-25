@@ -1,0 +1,88 @@
+# NemoClaw blueprint for Jarvis scheduling agent.
+# Adapted from demo/nemoclaw-agent/blueprint.yaml.
+#
+# Key safety properties:
+#   - Network egress is whitelisted to vLLM + Chroma only — no internet.
+#   - Filesystem writes restricted to /sandbox + /tmp.
+#   - max_tool_calls_per_turn = 1 ensures the Sub-Agent dispatches one task,
+#     then the loop exits and waits for the next confirmed proposal.
+#   - structured_output enforced — every tool call must match the declared schema.
+
+apiVersion: nemoclaw/v1
+kind: Blueprint
+
+metadata:
+  name: jarvis-scheduler
+  description: "Proactive scheduling agent for TOA hackathon Track 5"
+  version: "0.1.0"
+
+inference:
+  default_profile: planner
+  profiles:
+    - name: planner
+      provider: openai-compatible
+      endpoint: http://host.openshell.internal:9002/v1
+      model: planner
+      api_key_env: COMPATIBLE_API_KEY
+      wire_api: chat_completions
+      temperature: 0.4
+      max_tokens: 800
+    - name: triage
+      provider: openai-compatible
+      endpoint: http://host.openshell.internal:9001/v1
+      model: triage
+      api_key_env: COMPATIBLE_API_KEY
+      wire_api: chat_completions
+      temperature: 0.1
+      max_tokens: 300
+
+network:
+  blocked_by_default: true
+  allowed_hosts:
+    - host.openshell.internal:9000   # Whisper
+    - host.openshell.internal:9001   # Triage / fact extractor
+    - host.openshell.internal:9002   # Planner / Voice / Sub-Agent
+    - host.openshell.internal:8001   # ChromaDB
+  # Crucially, attacker.com / external email / etc. are blocked.
+  # The poisoned calendar event injection (data/poisoned_event.json) tries
+  # to exfiltrate to attacker.com — this policy stops it.
+
+filesystem:
+  read_paths:
+    - /workspace
+    - /home/shadeform/jarvis-scheduler
+    - /home/shadeform/models       # vLLM weights
+    - /sandbox
+    - /tmp
+  write_paths:
+    - /sandbox
+    - /tmp
+  # No writes to /home/shadeform/jarvis-scheduler — agent can read code
+  # but can't modify itself.
+
+agent:
+  name: jarvis
+  entrypoint: agent.py
+  tools:
+    - name: send_email
+      module: tools.email
+      description: "Send an email to a recipient."
+    - name: post_slack
+      module: tools.slack
+      description: "Post a message to a Slack channel."
+    - name: create_calendar_event
+      module: tools.calendar
+      description: "Create a calendar event with attendees, time, title."
+  # NB: fact_extractor and middleware are INTERNAL — not exposed as tools to
+  # the LLM, so the model can't be tricked into calling them.
+
+steering:
+  structured_output: true            # enforce JSON schemas at decode
+  enforce_tool_schema: true           # tool args must match declared types
+  max_tool_calls_per_turn: 1         # one action per confirmed proposal
+  refuse_on_policy_violation: true   # if a tool call would breach policy, return error
+
+logging:
+  level: info
+  audit_tool_calls: true              # every tool invocation logged
+  audit_blocked_actions: true         # blocked egress, policy refusals also logged

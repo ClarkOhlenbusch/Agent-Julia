@@ -1,0 +1,32 @@
+[
+  {
+    "subject": "Julie",
+    "type": "preference",
+    "fact": "prefers afternoon meetings (after 2pm) — she's not a morning person",
+    "confidence": 0.85
+  },
+  {
+    "subject": "Julie",
+    "type": "preference",
+    "fact": "is a vegetarian — avoid suggesting steakhouses or BBQ spots",
+    "confidence": 0.9
+  },
+  {
+    "subject": "Alex-Sam",
+    "type": "relationship",
+    "fact": "tend to grab drinks together on Friday evenings around 7-8pm",
+    "confidence": 0.75
+  },
+  {
+    "subject": "Sam",
+    "type": "social_pattern",
+    "fact": "usually proposes meeting near Fort Point or the Seaport — that's where he lives",
+    "confidence": 0.8
+  },
+  {
+    "subject": "Alex",
+    "type": "preference",
+    "fact": "avoids scheduling anything before 10am — late riser",
+    "confidence": 0.85
+  }
+]
