@@ -14,32 +14,25 @@ class TriageDecision(BaseModel):
     reason: str
 
 
-class TaskType(str, Enum):
-    send_email            = "send_email"
-    post_slack            = "post_slack"
-    create_calendar_event = "create_calendar_event"
-
-
 class TaskProposal(BaseModel):
-    task_type:    TaskType
-    recipients:   List[str]           # email addresses or Slack user/channel IDs
-    subject:      Optional[str] = None
-    content:      str
-    datetime_str: Optional[str] = None  # ISO-8601 or human string for calendar
-    duration_min: Optional[int] = 60    # calendar event length in minutes
-    location:     Optional[str] = None
-    voice_prompt: str                   # what Jarvis says when asking user to confirm
+    recipients:   List[str]           # Slack channel IDs or user IDs to notify
+    content:      str                 # The Slack message Julia will post
+    voice_prompt: str                 # What Julia asks the user before posting
 
 
 class ConfirmationAction(str, Enum):
-    YES    = "YES"
-    NO     = "NO"
-    MODIFY = "MODIFY"
+    YES = "YES"
+    NO  = "NO"
 
 
 class ConfirmationIntent(BaseModel):
-    action:       ConfirmationAction
-    modification: Optional[str] = None  # free-text if user wants to tweak something
+    action: ConfirmationAction
+
+
+class ToolResult(BaseModel):
+    success: bool
+    message: str
+    dry_run: bool = False
 
 
 class FactType(str, Enum):
@@ -47,7 +40,6 @@ class FactType(str, Enum):
     relationship   = "relationship"
     decision       = "decision"
     social_pattern = "social_pattern"
-    identity       = "identity"
 
 
 class Fact(BaseModel):
@@ -55,10 +47,3 @@ class Fact(BaseModel):
     type:       FactType
     fact:       str
     confidence: float
-
-
-class ToolResult(BaseModel):
-    success: bool
-    tool:    TaskType
-    message: str          # human-readable summary of what happened
-    dry_run: bool = False

@@ -1,178 +1,82 @@
 """
 macOS Slack huddle detector.
 
-Polls every POLL_INTERVAL seconds. When a Slack huddle becomes active,
-reads the channel name from Slack's window title, resolves it to a channel ID
-via the Slack API, then fires callbacks — no manual channel config needed.
+Polls every POLL_INTERVAL seconds. When a Slack huddle becomes active on
+this machine, fires on_start(channel_id) / on_stop(channel_id).
 
-  on_start(channel_id)  — huddle just became active
-  on_stop(channel_id)   — huddle just ended
+Channel is fixed via SLACK_CHANNEL env var — no auto-detection needed.
+
+Required env vars:
+  SLACK_CHANNEL  — the Slack channel ID to post into (e.g. C0XXXXXXX)
 """
-
 import asyncio
 import logging
 import os
 import re
-from typing import Callable, Coroutine
-
-import httpx
 
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL   = float(os.environ.get("HUDDLE_POLL_INTERVAL", "2.0"))
-SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+POLL_INTERVAL = float(os.environ.get("HUDDLE_POLL_INTERVAL", "2.0"))
+SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "")
 
-StartCallback = Callable[[str], Coroutine]
-StopCallback  = Callable[[str], Coroutine]
-
-# AppleScript: returns the Slack window title that contains "Huddle", or "".
-# Slack's window title during a huddle looks like: "# channel-name | Workspace"
-_APPLESCRIPT_HUDDLE_WINDOW = """
+# AppleScript: returns "true" if Slack has an active huddle window.
+_APPLESCRIPT = """
 tell application "System Events"
-    if not (exists process "Slack") then return ""
+    if not (exists process "Slack") then return "false"
     tell process "Slack"
         set allWindows to name of every window
         repeat with wName in allWindows
             if wName contains "Huddle" or wName contains "huddle" then
-                return wName as string
+                return "true"
             end if
         end repeat
     end tell
-    return ""
+    return "false"
 end tell
 """
 
 
-async def _get_huddle_window_title() -> str:
-    """Return the Slack window title if a huddle is active, else empty string."""
+async def _huddle_active() -> bool:
+    """Return True if Slack is currently in a huddle on this machine."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", _APPLESCRIPT_HUDDLE_WINDOW,
+            "osascript", "-e", _APPLESCRIPT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        return stdout.decode().strip()
+        return stdout.decode().strip() == "true"
     except (asyncio.TimeoutError, FileNotFoundError):
-        return ""
-
-
-def _parse_channel_name(window_title: str) -> str | None:
-    """
-    Extract a channel name from a Slack window title.
-    Examples:
-      "Huddle | # team-standup | Acme Workspace"  → "team-standup"
-      "# general – Huddle"                         → "general"
-    """
-    # Match "# channel-name" anywhere in the title
-    m = re.search(r"#\s*([\w\-]+)", window_title)
-    return m.group(1) if m else None
-
-
-async def _resolve_channel_id(channel_name: str) -> str | None:
-    """
-    Call conversations.list to find the channel ID for a given name.
-    Returns None if the bot isn't in the channel or the token is missing.
-    """
-    if not SLACK_BOT_TOKEN:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://slack.com/api/conversations.list",
-                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-                params={"types": "public_channel,private_channel", "limit": 200},
-            )
-            data = resp.json()
-            if not data.get("ok"):
-                log.warning("conversations.list error: %s", data.get("error"))
-                return None
-            for ch in data.get("channels", []):
-                if ch.get("name") == channel_name:
-                    return ch["id"]
-    except Exception as exc:
-        log.warning("Could not resolve channel name %r: %s", channel_name, exc)
-    return None
-
-
-async def _detect_active_channel() -> str | None:
-    """
-    Full detection pipeline:
-      1. AppleScript → window title
-      2. Parse channel name from title
-      3. Resolve name → channel ID via Slack API
-    Returns the channel ID string, or None if no huddle detected.
-    """
-    title = await _get_huddle_window_title()
-    if not title:
-        return None
-
-    channel_name = _parse_channel_name(title)
-    if not channel_name:
-        log.debug("Huddle detected but could not parse channel name from: %r", title)
-        # Fall back to posting to first channel we find with an active huddle
-        return await _fallback_find_huddle_channel()
-
-    channel_id = await _resolve_channel_id(channel_name)
-    if channel_id:
-        log.debug("Resolved #%s → %s", channel_name, channel_id)
-    return channel_id
-
-
-async def _fallback_find_huddle_channel() -> str | None:
-    """
-    If window title parsing fails, scan conversations.list for a channel
-    that has an active huddle (Slack marks these with has_ongoing_call=True).
-    """
-    if not SLACK_BOT_TOKEN:
-        return None
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                "https://slack.com/api/conversations.list",
-                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
-                params={"types": "public_channel,private_channel", "limit": 200},
-            )
-            data = resp.json()
-            for ch in data.get("channels", []):
-                if ch.get("has_ongoing_call") or ch.get("is_open"):
-                    return ch["id"]
-    except Exception as exc:
-        log.warning("Fallback huddle channel search failed: %s", exc)
-    return None
+        return False
 
 
 class HuddleDetector:
-    def __init__(self, on_start: StartCallback, on_stop: StopCallback):
-        self.on_start        = on_start
-        self.on_stop         = on_stop
-        self._active_channel: str | None = None
-        self._running        = False
+    def __init__(self, on_start, on_stop):
+        self.on_start       = on_start
+        self.on_stop        = on_stop
+        self._was_active    = False
+        self._running       = False
 
     async def run(self) -> None:
+        if not SLACK_CHANNEL:
+            raise EnvironmentError("SLACK_CHANNEL env var is not set.")
+
         self._running = True
-        log.info("Huddle detector polling every %.1fs", POLL_INTERVAL)
+        log.info("Huddle detector polling every %.1fs → channel %s", POLL_INTERVAL, SLACK_CHANNEL)
 
         while self._running:
             try:
-                channel_id = await _detect_active_channel()
+                active = await _huddle_active()
 
-                if channel_id and not self._active_channel:
-                    log.info("Huddle started in %s — activating Juliah", channel_id)
-                    self._active_channel = channel_id
-                    try:
-                        await self.on_start(channel_id)
-                    except Exception as exc:
-                        log.error("on_start failed: %s", exc)
+                if active and not self._was_active:
+                    self._was_active = True
+                    log.info("Huddle started")
+                    await self.on_start(SLACK_CHANNEL)
 
-                elif not channel_id and self._active_channel:
-                    log.info("Huddle ended in %s — stopping Juliah", self._active_channel)
-                    stopped_channel      = self._active_channel
-                    self._active_channel = None
-                    try:
-                        await self.on_stop(stopped_channel)
-                    except Exception as exc:
-                        log.error("on_stop failed: %s", exc)
+                elif not active and self._was_active:
+                    self._was_active = False
+                    log.info("Huddle ended")
+                    await self.on_stop(SLACK_CHANNEL)
 
             except Exception as exc:
                 log.warning("Detection error (will retry): %s", exc)
@@ -184,10 +88,6 @@ class HuddleDetector:
 
 
 def make_callbacks():
-    """
-    Build on_start / on_stop callbacks that wire the detector into Juliah.
-    Channel ID is passed in automatically — no config needed.
-    """
     from meeting_summary import post_join_notification, post_end_summary
     from session import HuddleSession
 
@@ -199,7 +99,7 @@ def make_callbacks():
         await post_join_notification(channel_id)
 
     async def on_stop(channel_id: str) -> None:
-        session: HuddleSession | None = state.get("session")
+        session = state.get("session")
         if session is None:
             return
         session.end()
@@ -210,25 +110,19 @@ def make_callbacks():
 
 
 # ------------------------------------------------------------------
-# Standalone smoke-test
+# Smoke-test: python huddle_detector.py
 # ------------------------------------------------------------------
-
 async def _smoke_test() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    async def on_start(channel_id: str) -> None:
-        print(f">>> STARTED in channel {channel_id}")
-
-    async def on_stop(channel_id: str) -> None:
-        print(f">>> STOPPED in channel {channel_id}")
+    async def on_start(ch): print(f">>> STARTED → {ch}")
+    async def on_stop(ch):  print(f">>> STOPPED → {ch}")
 
     print("Start/stop a Slack huddle to test. Ctrl+C to quit.")
-    detector = HuddleDetector(on_start=on_start, on_stop=on_stop)
     try:
-        await detector.run()
+        await HuddleDetector(on_start, on_stop).run()
     except asyncio.CancelledError:
         pass
-
 
 if __name__ == "__main__":
     asyncio.run(_smoke_test())

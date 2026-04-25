@@ -1,55 +1,53 @@
 """
-Sub-agent: receives a confirmed TaskProposal and dispatches to the right tool.
-
-After execution it logs the outcome back to episodic memory so the agent
-doesn't re-propose the same action.
+Sub-agent: posts the confirmed Slack message and logs the result to session memory.
 """
 import logging
+import os
 from typing import TYPE_CHECKING
 
-from schema import TaskProposal, TaskType, ToolResult
+import httpx
+
+from schema import TaskProposal, ToolResult
 
 if TYPE_CHECKING:
     from memory import MemoryStore
 
 log = logging.getLogger(__name__)
 
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_CHANNEL   = os.environ.get("SLACK_CHANNEL", "")
+DRY_RUN         = os.environ.get("DRY_RUN", "false").lower() == "true"
+
+
+async def _post(channel: str, text: str) -> str:
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+            json={"channel": channel, "text": text},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if not data.get("ok"):
+            raise RuntimeError(data.get("error", "Slack error"))
+        return data["ts"]
+
 
 async def execute(proposal: TaskProposal, memory: "MemoryStore") -> ToolResult:
-    """Dispatch proposal to the correct tool and record the outcome."""
+    channel = SLACK_CHANNEL
 
-    # Import here to avoid circular imports at module load time
-    from tools.email    import send_email
-    from tools.slack    import post_slack
-    from tools.calendar import create_calendar_event
-
-    dispatch = {
-        TaskType.send_email:            send_email,
-        TaskType.post_slack:            post_slack,
-        TaskType.create_calendar_event: create_calendar_event,
-    }
-
-    handler = dispatch.get(proposal.task_type)
-    if handler is None:
-        result = ToolResult(
-            success=False,
-            tool=proposal.task_type,
-            message=f"Unknown task type: {proposal.task_type}",
-        )
+    if DRY_RUN:
+        log.info("[DRY RUN] Would post to %s: %s", channel, proposal.content)
+        result = ToolResult(success=True, message=f"[dry-run] {proposal.content}", dry_run=True)
     else:
-        log.info("Sub-agent executing %s for %s", proposal.task_type, proposal.recipients)
-        result = await handler(proposal)
+        try:
+            ts = await _post(channel, proposal.content)
+            log.info("Posted to %s (ts=%s)", channel, ts)
+            result = ToolResult(success=True, message=proposal.content)
+        except Exception as exc:
+            log.error("Post failed: %s", exc)
+            result = ToolResult(success=False, message=str(exc))
 
-    # Log the outcome to episodic memory so the agent remembers what it did
-    status = "completed" if result.success else "failed"
-    memory_entry = (
-        f"[sub-agent] {status}: {proposal.task_type} — {result.message}"
-    )
-    memory.write_episodic(memory_entry)
-
-    if result.success:
-        log.info("Sub-agent success: %s", result.message)
-    else:
-        log.warning("Sub-agent failure: %s", result.message)
-
+    status = "posted" if result.success else "failed to post"
+    memory.write_episodic(f"[Julia] {status}: {proposal.content}")
     return result
