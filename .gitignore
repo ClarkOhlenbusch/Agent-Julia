@@ -15,11 +15,13 @@ __pycache__/
 *.so
 .Python
 .venv/
+.codex-venv/
 venv/
 env/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.tmp/
 
 # Editor / OS
 .DS_Store
