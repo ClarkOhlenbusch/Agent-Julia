@@ -2,7 +2,7 @@ import os
 
 # Detect NemoClaw sandbox — in sandbox, vLLM is on the host side
 IN_NEMOCLAW = os.environ.get("NEMOCLAW_SANDBOX", "false").lower() == "true"
-_VLLM_HOST = "host.openshell.internal" if IN_NEMOCLAW else "localhost"
+_VLLM_HOST = "host.openshell.internal" if IN_NEMOCLAW else os.environ.get("VLLM_HOST", "localhost")
 
 WHISPER_BASE_URL = f"http://{_VLLM_HOST}:9000/v1"
 TRIAGE_BASE_URL  = f"http://{_VLLM_HOST}:9001/v1"
@@ -11,9 +11,9 @@ AGENT_BASE_URL   = f"http://{_VLLM_HOST}:9002/v1"
 CHROMA_HOST = os.environ.get("CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8001"))
 
-WHISPER_MODEL = "openai/whisper-large-v3-turbo"
-TRIAGE_MODEL  = "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"
-AGENT_MODEL   = "RedHatAI/Mistral-Small-3.2-24B-Instruct-2506-FP8"
+WHISPER_MODEL = "whisper-turbo"
+TRIAGE_MODEL  = "triage"
+AGENT_MODEL   = "planner"
 
 TIVOO_IP   = os.environ.get("TIVOO_IP", "192.168.1.100")
 TIVOO_PORT = 80

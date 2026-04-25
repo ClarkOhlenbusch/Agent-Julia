@@ -36,14 +36,20 @@ def _to_wav_bytes(audio: np.ndarray) -> bytes:
 
 async def transcribe_bytes(wav_bytes: bytes) -> str:
     """Send raw WAV bytes to the vLLM Whisper endpoint, return transcript text."""
+    import json
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{WHISPER_BASE_URL}/audio/transcriptions",
             files={"file": ("audio.wav", wav_bytes, "audio/wav")},
             data={"model": WHISPER_MODEL, "response_format": "text"},
         )
+        if not resp.is_success:
+            log.warning("Whisper %d: %s", resp.status_code, resp.text[:200])
         resp.raise_for_status()
-        return resp.text.strip()
+        try:
+            return resp.json().get("text", "").strip()
+        except Exception:
+            return resp.text.strip()
 
 
 async def capture_and_transcribe(callback, stop_event: asyncio.Event) -> None:

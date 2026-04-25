@@ -8,6 +8,14 @@ class TriageAction(str, Enum):
     DISCARD = "DISCARD"
     ACT     = "ACT"
 
+TriageRoute = TriageAction  # alias for team compatibility
+
+
+class TaskType(str, Enum):
+    SEND_SLACK_MESSAGE    = "SEND_SLACK_MESSAGE"
+    CREATE_CALENDAR_EVENT = "CREATE_CALENDAR_EVENT"
+    SEND_EMAIL            = "SEND_EMAIL"
+
 
 class TriageDecision(BaseModel):
     action: TriageAction
@@ -34,6 +42,9 @@ class ToolResult(BaseModel):
     message: str
     dry_run: bool = False
 
+TaskResult    = ToolResult           # alias for team compatibility
+ConfirmIntent = ConfirmationIntent   # alias for team compatibility
+
 
 class FactType(str, Enum):
     preference     = "preference"
@@ -47,3 +58,7 @@ class Fact(BaseModel):
     type:       FactType
     fact:       str
     confidence: float
+
+
+class FactList(BaseModel):
+    facts: List[Fact]
