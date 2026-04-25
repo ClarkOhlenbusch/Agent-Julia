@@ -13,6 +13,7 @@ from typing import Optional
 import httpx
 
 import memory
+import observability
 from schema import TaskProposal, TaskType
 from tools import calendar as cal_tool
 
@@ -49,6 +50,7 @@ Slack parameters MUST include: channel, message.
 """
 
 
+@observability.task(name="plan")
 def plan(recent_transcript: str, attendees_hint: Optional[list[str]] = None) -> TaskProposal:
     semantic = memory.semantic_search(recent_transcript, k=8)
     episodic = memory.episodic_search(recent_transcript, k=5)

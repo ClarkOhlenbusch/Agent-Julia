@@ -14,6 +14,7 @@ from typing import Optional
 import httpx
 
 import memory
+import observability
 from schema import Fact, FactType, FactList
 
 EXTRACT_ENDPOINT = os.getenv("TRIAGE_ENDPOINT", "http://localhost:9001/v1")
@@ -42,6 +43,7 @@ Output JSON ONLY: {"facts": [{"subject": "...", "type": "...", "fact": "...", "c
 """
 
 
+@observability.task(name="fact_extractor")
 def extract(force: bool = False) -> list[Fact]:
     """Run extraction over the most recent ~20 episodic chunks. Respects rate limit."""
     global _last_run

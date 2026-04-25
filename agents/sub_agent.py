@@ -8,12 +8,14 @@ from __future__ import annotations
 import json
 
 import memory
+import observability
 from schema import TaskProposal, TaskType, TaskResult, Fact, FactType
 from tools import calendar as cal_tool
 from tools import email as email_tool
 from tools import slack as slack_tool
 
 
+@observability.agent(name="sub_agent")
 def execute(proposal: TaskProposal) -> TaskResult:
     """Dispatch and run."""
     params = proposal.parameters

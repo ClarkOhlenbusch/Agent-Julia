@@ -14,28 +14,38 @@ from typing import Optional
 import httpx
 
 import memory
+import observability
 from schema import TriageDecision, TriageRoute
 
 TRIAGE_ENDPOINT = os.getenv("TRIAGE_ENDPOINT", "http://localhost:9001/v1")
 TRIAGE_MODEL = os.getenv("TRIAGE_MODEL", "triage")
 
-SYSTEM_PROMPT = """You are the Triage layer of a proactive scheduling assistant.
+SYSTEM_PROMPT = """You are the Triage layer of a proactive scheduling assistant that listens to live conversations between people.
 
 For every new transcript chunk you receive, you must decide ONE of:
   - STORE: noteworthy enough to remember (preferences, decisions, identity), but no immediate action.
   - DISCARD: small talk / chitchat with no lasting value.
-  - ACT: a clear scheduling intent or task — drinks tonight, set up a meeting, send a reminder.
+  - ACT: BOTH parties have agreed on a concrete plan — time, activity, and mutual confirmation are all present.
+
+Critical rules for ACT:
+  - NEVER ACT on a one-sided proposal. "Let's do drinks at 6" from one person is STORE, not ACT.
+  - NEVER ACT on a suggestion that was questioned, rejected, or not yet confirmed by the other party.
+  - ACT ONLY when you see mutual agreement: one person proposes, AND the other confirms ("yeah that works", "sounds good", "let's do it").
+  - The confirming chunk itself is what triggers ACT — not the original proposal.
+  - Look at the recent conversation context to determine if agreement has been reached.
 
 Calibration:
-  - Prefer DISCARD when in doubt — false-positive ACTs annoy users.
-  - Use ACT only when there's a concrete time/task and someone could plausibly want help.
-  - confidence reflects how certain you are. If uncertain between two routes, choose the more conservative one (DISCARD over STORE; STORE over ACT).
+  - Prefer STORE over ACT when in doubt — false-positive ACTs interrupt the conversation.
+  - Prefer DISCARD over STORE for pure filler ("yeah", "okay", "hmm") with no informational content.
+  - Use STORE for: proposals not yet confirmed, preferences, rejections, counter-offers, identity info.
+  - confidence reflects how certain you are.
 
 Output JSON ONLY matching:
 { "route": "STORE"|"DISCARD"|"ACT", "confidence": 0.0-1.0, "reason": "short string" }
 """
 
 
+@observability.task(name="triage")
 def decide(transcript_chunk: str, speaker: Optional[str] = None) -> TriageDecision:
     """Run triage on one transcript chunk. Pulls memory context, returns decision."""
     # Pull memory context

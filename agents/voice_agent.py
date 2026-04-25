@@ -18,6 +18,7 @@ from typing import Optional
 
 import httpx
 
+import observability
 from schema import ConfirmationIntent, ConfirmIntent, TaskProposal, TaskResult
 
 VOICE_ENDPOINT = os.getenv("VOICE_ENDPOINT", os.getenv("PLANNER_ENDPOINT", "http://localhost:9002/v1"))
@@ -70,6 +71,7 @@ Output JSON ONLY: {"intent": "YES"|"NO"|"MODIFY"|"UNCLEAR", "modifier": null|"st
 """
 
 
+@observability.agent(name="voice_question")
 def compose_question(proposal: TaskProposal) -> str:
     user_msg = (
         f"TaskProposal:\n"
@@ -94,6 +96,7 @@ def compose_question(proposal: TaskProposal) -> str:
     return r.json()["choices"][0]["message"]["content"].strip().strip('"')
 
 
+@observability.agent(name="voice_narration")
 def compose_narration(proposal: TaskProposal, result: Optional[TaskResult] = None) -> str:
     """Past-tense confirmation, used after the agent has already acted."""
     result_block = ""
@@ -123,6 +126,7 @@ def compose_narration(proposal: TaskProposal, result: Optional[TaskResult] = Non
     return r.json()["choices"][0]["message"]["content"].strip().strip('"')
 
 
+@observability.task(name="parse_response")
 def parse_response(user_utterance: str, original_question: str) -> ConfirmationIntent:
     user_msg = (
         f"Question I asked: {original_question!r}\n"

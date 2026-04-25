@@ -24,9 +24,13 @@ from typing import Optional
 from rich.console import Console
 
 import memory
+import observability
 import transcription
 from agents import middleware, planner, voice_agent, sub_agent, fact_extractor
 from schema import TriageRoute, TaskProposal
+
+# Initialize Datadog LLMObs at import time. No-op if env vars are unset.
+observability.ensure_llmobs_enabled()
 
 console = Console()
 
@@ -78,7 +82,8 @@ def _write_result(message: str) -> None:
         pass
 
 
-def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
+def handle_chunk(text: str, speaker: Optional[str] = None,
+                 session_id: Optional[str] = None) -> dict:
     """Process one transcript chunk. Returns a status dict for UI/logging."""
     global _last_interject_at
     now = time.time()
@@ -90,6 +95,14 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
     # Always buffer in episodic (rolling 10-min in-memory)
     memory.episodic_write(text, speaker=speaker)
 
+    sess = session_id or os.getenv("JARVIS_SESSION_ID", "live")
+
+    with observability.workflow(name="jarvis_voice_turn", session_id=sess) as span:
+        return _process_chunk_inner(text, speaker, now, span)
+
+
+def _process_chunk_inner(text: str, speaker: Optional[str], now: float, span) -> dict:
+    global _last_interject_at
     decision = middleware.decide(text, speaker=speaker)
     console.log(f"[bold]TRIAGE[/]: {decision.route.value} ({decision.confidence:.2f}) — {decision.reason}")
 
@@ -130,6 +143,12 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
 
     # DISCARD: nothing beyond the episodic buffer
 
+    observability.annotate(
+        span,
+        input_data={"text": text, "speaker": speaker},
+        output_data=out,
+        metadata={"route": decision.route.value, "confidence": decision.confidence},
+    )
     return out
 
 
