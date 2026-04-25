@@ -588,7 +588,7 @@ footer { display: none !important; }
 
 
 def build_ui():
-    with gr.Blocks(title="Julia — Proactive Scheduling Agent", css=JULIA_CSS) as app:
+    with gr.Blocks(title="Julia — Proactive Scheduling Agent") as app:
         initial_audio_state = _new_audio_state()
         audio_state = gr.State(initial_audio_state)
         gr.Markdown(
@@ -680,6 +680,7 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         show_error=True,
+        css=JULIA_CSS,
         theme=gr.themes.Soft(
             primary_hue=gr.themes.colors.pink,
             secondary_hue=gr.themes.colors.pink,
