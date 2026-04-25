@@ -1,107 +1,92 @@
-"""Divoom Tivoo-2 HTTP API wrapper.
+"""Divoom Tivoo-2 control via Bluetooth (macOS).
 
-Tivoo-2 (model TIIV00-2) supports the Divoom HTTP API over Wi-Fi.
-Both the laptop and the Tivoo must be on the same network (phone hotspot for the demo).
+Wraps solar2ain/tivoo-control's CLI (clone to ~/tivoo-control, compile bridge
+once with: clang -framework Foundation -framework IOBluetooth -o tivoo_cmd
+tivoo_cmd.m -fobjc-arc).
 
-Find the device IP via the Divoom phone app: My Devices → tap the device → "Local IP".
-Set TIVOO_IP env var or pass to functions.
+Required env:
+  TIVOO_MAC=AA:BB:CC:DD:EE:FF   (find via System Preferences → Bluetooth)
+  TIVOO_REPO=~/tivoo-control     (defaults to ~/tivoo-control)
+  TIVOO_PYTHON=...               (path to a python with click + Pillow)
 """
 from __future__ import annotations
 
 import os
-import time
+import shlex
+import subprocess
 from typing import Optional
 
-import httpx
+TIVOO_MAC = os.getenv("TIVOO_MAC", "B1:21:81:09:57:BE")
+TIVOO_REPO = os.path.expanduser(os.getenv("TIVOO_REPO", "~/tivoo-control"))
+TIVOO_PYTHON = os.getenv("TIVOO_PYTHON",
+                         os.path.expanduser("~/vllm-hackathon/.venv/bin/python3"))
 
-TIVOO_IP = os.getenv("TIVOO_IP", "")
-DIVOOM_PORT = 80
-
-
-def _post(payload: dict, ip: Optional[str] = None) -> dict:
-    target = ip or TIVOO_IP
-    if not target:
-        raise RuntimeError("TIVOO_IP not set. Set env var or pass ip=.")
-    url = f"http://{target}:{DIVOOM_PORT}/post"
-    with httpx.Client(timeout=8) as c:
-        r = c.post(url, json=payload)
-    r.raise_for_status()
-    return r.json() if r.headers.get("content-type", "").startswith("application/json") else {"raw": r.text}
-
-
-# ============================================================================
-# State display — emoji-style icons via the device's built-in channels
-# ============================================================================
-
-# State → channel/clock face index (rough mapping; tune to whatever looks best on device)
-_STATE_TO_CHANNEL = {
-    "idle":      {"Command": "Channel/SetIndex", "SelectIndex": 0},   # clock
-    "listening": {"Command": "Channel/SetIndex", "SelectIndex": 1},   # cloud (substitute for ear)
-    "thinking":  {"Command": "Channel/SetIndex", "SelectIndex": 2},   # planet / radar
-    "speaking":  {"Command": "Channel/SetIndex", "SelectIndex": 3},   # animation
-    "booked":    {"Command": "Channel/SetIndex", "SelectIndex": 0},   # back to clock = success
+# Agent state → CLI sub-command mapping. We use presets where we can since
+# they're snappy and self-contained.
+STATE_TO_CMD: dict[str, list[str]] = {
+    "idle":      ["preset", "moon", "--duration", "5"],
+    "listening": ["preset", "searching", "--duration", "8"],
+    "thinking":  ["preset", "loading", "--loop", "0", "--duration", "6"],
+    "speaking":  ["preset", "bell", "--duration", "5"],
+    "booked":    ["preset", "success", "--duration", "6"],
+    "rejected":  ["preset", "cross", "--duration", "4"],
+    "error":     ["preset", "error", "--duration", "4"],
 }
 
 
-def set_state(state: str, ip: Optional[str] = None) -> dict:
-    """Show one of: idle | listening | thinking | speaking | booked."""
-    payload = _STATE_TO_CHANNEL.get(state, _STATE_TO_CHANNEL["idle"])
-    return _post(payload, ip=ip)
-
-
-def show_text(text: str, ip: Optional[str] = None, color: str = "FFFFFF") -> dict:
-    """Scroll text across the display."""
-    return _post({
-        "Command": "Draw/SendHttpText",
-        "TextId": 1,
-        "x": 0,
-        "y": 0,
-        "dir": 0,         # 0 = scroll right-to-left
-        "font": 4,
-        "TextWidth": 64,
-        "speed": 30,
-        "TextString": text,
-        "color": color,
-        "align": 1,
-    }, ip=ip)
-
-
-def beep(ip: Optional[str] = None, ms: int = 200) -> dict:
-    """Short beep — for interjection alert."""
-    return _post({"Command": "Device/PlayBuzzer",
-                  "ActiveTimeInCycle": ms, "OffTimeInCycle": 0, "PlayTotalTime": ms}, ip=ip)
-
-
-def set_brightness(level: int, ip: Optional[str] = None) -> dict:
-    return _post({"Command": "Channel/SetBrightness", "Brightness": max(0, min(100, level))}, ip=ip)
-
-
-def discover() -> list[str]:
-    """Try to find Divoom devices on the LAN via the public discovery endpoint."""
+def _run(args: list[str], timeout: float = 15.0) -> tuple[bool, str]:
+    """Run tivoo_macos.py with given args. Returns (success, stdout/err)."""
+    cmd = [TIVOO_PYTHON, "tivoo_macos.py"] + args
+    env = {**os.environ, "TIVOO_MAC": TIVOO_MAC}
     try:
-        with httpx.Client(timeout=5) as c:
-            r = c.post("https://app.divoom-gz.com/Device/ReturnSameLANDevice", json={})
-        r.raise_for_status()
-        return [d.get("DevicePrivateIP") for d in r.json().get("DeviceList", []) if d.get("DevicePrivateIP")]
-    except Exception:
-        return []
+        r = subprocess.run(cmd, cwd=TIVOO_REPO, env=env, capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode == 0, (r.stdout + r.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    except FileNotFoundError as e:
+        return False, f"not found: {e}"
+
+
+def set_state(state: str) -> tuple[bool, str]:
+    """Display the Tivoo preset for the given agent state."""
+    args = STATE_TO_CMD.get(state) or STATE_TO_CMD["idle"]
+    return _run(args)
+
+
+def show_text(text: str, color: str = "cyan") -> tuple[bool, str]:
+    return _run(["text", text, "--color", color])
+
+
+def show_clock() -> tuple[bool, str]:
+    return _run(["clock"])
+
+
+def brightness(level: int) -> tuple[bool, str]:
+    return _run(["brightness", str(max(0, min(100, level)))])
+
+
+def status() -> tuple[bool, str]:
+    return _run(["status"])
+
+
+def off() -> tuple[bool, str]:
+    return _run(["off"])
 
 
 if __name__ == "__main__":
-    import sys
-    if not TIVOO_IP:
-        print("Set TIVOO_IP first. Try discovery:")
-        for ip in discover():
-            print(f"  found: {ip}")
-        print("Or open the Divoom app and check 'Local IP' for the device.")
-        sys.exit(1)
-    print(f"Pinging Tivoo at {TIVOO_IP} ...")
-    set_state("idle")
-    time.sleep(1)
-    show_text("JARVIS")
-    time.sleep(2)
-    for s in ("listening", "thinking", "speaking", "booked"):
-        set_state(s)
-        print(f"  → {s}")
-        time.sleep(1.5)
+    import sys, time
+    print(f"Tivoo @ {TIVOO_MAC} via {TIVOO_REPO}")
+    if len(sys.argv) > 1:
+        # Pass-through mode: python3 divoom.py text "Hello"
+        ok, out = _run(sys.argv[1:])
+        print(out)
+        sys.exit(0 if ok else 1)
+    # Demo: cycle through every state
+    for st in ("listening", "thinking", "speaking", "booked", "idle"):
+        print(f"  → {st}")
+        ok, out = set_state(st)
+        if not ok:
+            print(f"    FAIL: {out}")
+        time.sleep(3)
     print("Done.")
