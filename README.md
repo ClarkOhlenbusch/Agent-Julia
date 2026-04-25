@@ -1,7 +1,9 @@
-# Jarvis Scheduling Agent — Track 5 Plan
+# Julia Scheduling Agent — Track 5 Plan
 
 > **TOA vLLM/LLM-D Hackathon · April 25, 2026 · Boston**
 > **Track 5 — Agentic Edge powered by NemoClaw** (NVIDIA GPU Prize: RTX 5090)
+
+<img width="2900" height="3867" alt="image" src="https://github.com/user-attachments/assets/6c315a32-c6d5-42a7-b56a-03fd97ed55d0" />
 
 ---
 
