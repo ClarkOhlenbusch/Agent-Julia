@@ -21,16 +21,17 @@ TIVOO_REPO = os.path.expanduser(os.getenv("TIVOO_REPO", "~/tivoo-control"))
 TIVOO_PYTHON = os.getenv("TIVOO_PYTHON",
                          os.path.expanduser("~/vllm-hackathon/.venv/bin/python3"))
 
-# Agent state → CLI sub-command mapping. We use presets where we can since
-# they're snappy and self-contained.
+# Agent state → CLI sub-command mapping.
+# Emotion presets give the Tivoo an animated face that feels alive.
+# --duration 0 = loop forever (relay sends a new state to interrupt).
 STATE_TO_CMD: dict[str, list[str]] = {
-    "idle":      ["preset", "moon", "--duration", "5"],
-    "listening": ["preset", "searching", "--duration", "8"],
-    "thinking":  ["preset", "loading", "--loop", "0", "--duration", "6"],
-    "speaking":  ["preset", "bell", "--duration", "5"],
-    "booked":    ["preset", "success", "--duration", "6"],
-    "rejected":  ["preset", "cross", "--duration", "4"],
-    "error":     ["preset", "error", "--duration", "4"],
+    "idle":      ["preset", "cool", "--duration", "0"],
+    "listening": ["preset", "happy", "--duration", "0"],
+    "thinking":  ["preset", "thinking", "--duration", "0"],
+    "speaking":  ["preset", "wink", "--duration", "0"],
+    "booked":    ["preset", "party", "--duration", "6"],
+    "rejected":  ["preset", "sad", "--duration", "6"],
+    "error":     ["preset", "shock", "--duration", "4"],
 }
 
 

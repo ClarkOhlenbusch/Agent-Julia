@@ -568,35 +568,11 @@ def on_seed():
 # UI
 # ============================================================================
 
-JULIA_CSS = """
-.gradio-container {
-    background: linear-gradient(135deg, #fff0f5 0%, #ffffff 50%, #fff0f5 100%) !important;
-}
-.gr-button-primary {
-    background-color: #e91e8c !important;
-    border-color: #e91e8c !important;
-}
-.gr-button {
-    border-color: #f06292 !important;
-    color: #c2185b !important;
-}
-.gr-button:hover {
-    background-color: #fce4ec !important;
-}
-footer { display: none !important; }
-"""
-
-
 def build_ui():
     with gr.Blocks(title="Julia — Proactive Scheduling Agent") as app:
         initial_audio_state = _new_audio_state()
         audio_state = gr.State(initial_audio_state)
-        gr.Markdown(
-            "<div style='text-align:center'>"
-            "<h1 style='color:#e91e8c; margin-bottom:0'>💬 Julia</h1>"
-            "<p style='color:#f06292; margin-top:4px'><em>Proactive Scheduling Agent · vLLM + NemoClaw + Red Hat AI</em></p>"
-            "</div>"
-        )
+        gr.Markdown("# Julia\n*Proactive Scheduling Agent — vLLM + NemoClaw + Red Hat AI*")
 
         with gr.Row():
             with gr.Column(scale=2):
@@ -680,10 +656,4 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         show_error=True,
-        css=JULIA_CSS,
-        theme=gr.themes.Soft(
-            primary_hue=gr.themes.colors.pink,
-            secondary_hue=gr.themes.colors.pink,
-            neutral_hue=gr.themes.colors.gray,
-        ),
     )
