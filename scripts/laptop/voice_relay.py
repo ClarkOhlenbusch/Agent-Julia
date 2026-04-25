@@ -15,10 +15,12 @@ Stop with Ctrl+C.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import warnings
 from pathlib import Path
 
@@ -27,6 +29,7 @@ warnings.filterwarnings("ignore")
 
 import numpy as np
 import soundfile as sf
+import inflect
 
 BREV_INSTANCE = os.getenv("BREV_INSTANCE", "jarvis-track5")
 POLL_INTERVAL_S = float(os.getenv("POLL_INTERVAL_S", "0.6"))
@@ -36,6 +39,72 @@ QUESTION_FILE = "/tmp/jarvis_question.txt"
 RESULT_FILE = "/tmp/jarvis_result.txt"
 
 _pipeline = None
+_inflect = inflect.engine()
+
+
+# ============================================================================
+# TTS text normalization — Kokoro mispronounces digits + smart punctuation
+# ============================================================================
+
+_TYPOGRAPHIC = {
+    "—": ", ", "–": ", ", "…": "...",
+    "“": '"', "”": '"', "‘": "'", "’": "'",
+    "&": " and ", "%": " percent ", "@": " at ", "/": " or ",
+    "#": " number ", "$": " dollars ", "+": " plus ",
+}
+
+
+def _spell_time(m: re.Match) -> str:
+    h, mn = int(m.group(1)), int(m.group(2))
+    suffix = (m.group(3) or "").strip().lower()
+    h12 = h if h <= 12 else h - 12
+    h_word = _inflect.number_to_words(h12)
+    if mn == 0:
+        out = f"{h_word} o'clock"
+    elif mn == 30:
+        out = f"{h_word} thirty"
+    elif mn == 15:
+        out = f"{h_word} fifteen"
+    elif mn == 45:
+        out = f"{h_word} forty-five"
+    else:
+        out = f"{h_word} {_inflect.number_to_words(mn)}"
+    if suffix in ("am", "pm"):
+        out += f" {suffix.upper()}"
+    return out
+
+
+def _spell_int(m: re.Match) -> str:
+    return _inflect.number_to_words(int(m.group(0)))
+
+
+def normalize_for_tts(text: str) -> str:
+    if not text:
+        return text
+    # Smart punctuation -> neutral
+    for k, v in _TYPOGRAPHIC.items():
+        text = text.replace(k, v)
+    # Strip remaining non-ASCII (Kokoro is ASCII-only realistically)
+    text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")
+    # Times: 7:30, 7:30pm, 12:00 PM
+    # Strip ISO timestamps entirely — agent should format times human-readably,
+    # but defense-in-depth: replace with " at HH:MM" then let time regex handle it.
+    text = re.sub(
+        r"\d{4}-\d{2}-\d{2}T(\d{2}):(\d{2}):\d{2}(?:[+-]\d{2}:\d{2})?",
+        lambda m: f"{m.group(1)}:{m.group(2)}",
+        text,
+    )
+    # Times: 7:30, 12:00 PM, 19:30 (use lookbehind/ahead so embedded digits in
+    # weird contexts don't break — e.g. T19:30:00 where \b fails after T).
+    text = re.sub(
+        r"(?<!\d)(\d{1,2}):(\d{2})(?:\s+(am|pm|AM|PM))?(?!\d)",
+        _spell_time, text,
+    )
+    # Plain integers (years, counts) — but not those adjacent to letters/digits
+    text = re.sub(r"(?<![\w-])\d{1,4}(?![\w-])", _spell_int, text)
+    # Collapse extra whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def _ensure_pipeline():
@@ -61,8 +130,11 @@ def fetch_remote(path: str) -> str:
 
 def synthesize(text: str, out_path: str) -> bool:
     pipe = _ensure_pipeline()
+    norm = normalize_for_tts(text)
+    if norm != text:
+        print(f"   normalized: {norm!r}")
     try:
-        gen = pipe(text, voice=KOKORO_VOICE)
+        gen = pipe(norm, voice=KOKORO_VOICE)
         chunks = [r.audio for r in gen]
         if not chunks:
             return False
