@@ -15,8 +15,12 @@ import os
 
 import httpx
 import numpy as np
-import sounddevice as sd
-import scipy.io.wavfile as wav_io
+try:
+    import sounddevice as sd
+    import scipy.io.wavfile as wav_io
+    _MIC_AVAILABLE = True
+except OSError:
+    _MIC_AVAILABLE = False
 
 from config import WHISPER_BASE_URL, WHISPER_MODEL
 
@@ -50,7 +54,13 @@ async def capture_and_transcribe(callback, stop_event: asyncio.Event) -> None:
     """
     Continuously capture mic audio until stop_event is set.
     For each non-silent chunk, transcribes and calls await callback(text).
+    Requires PortAudio (sounddevice) — not available on headless VMs.
     """
+    if not _MIC_AVAILABLE:
+        log.error("sounddevice/PortAudio not available — mic capture disabled")
+        await stop_event.wait()
+        return
+
     loop       = asyncio.get_event_loop()
     audio_queue: asyncio.Queue = asyncio.Queue()
 
