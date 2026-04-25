@@ -1,0 +1,39 @@
+# Inference / LLM
+openai>=1.30.0
+vllm>=0.11.0
+
+# Google APIs (Gmail + Calendar)
+google-auth>=2.29.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+google-api-python-client>=2.126.0
+
+# Slack
+httpx>=0.27.0
+
+# Data / validation
+pydantic>=2.7.0
+dateparser>=1.2.0
+
+# Vector DB
+chromadb>=0.5.0
+sentence-transformers>=3.0.0
+
+# Audio
+sounddevice>=0.4.6
+numpy>=1.26.0
+scipy>=1.13.0
+
+# TTS (Piper runs as a subprocess; no pip package needed for the binary)
+# pip install piper-tts  — only if using the Python wrapper
+# piper-tts>=1.2.0
+
+# UI
+gradio>=4.36.0
+
+# Tivoo / Divoom
+# httpx already covers this
+
+# Utilities
+python-dotenv>=1.0.0
+tenacity>=8.3.0
