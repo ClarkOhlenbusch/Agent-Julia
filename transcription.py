@@ -18,13 +18,20 @@ WHISPER_MODEL = os.getenv("WHISPER_MODEL", "whisper-turbo")
 def transcribe_bytes(audio_bytes: bytes, filename: str = "chunk.wav",
                      content_type: str = "audio/wav") -> str:
     """Transcribe audio bytes via vLLM Whisper. Returns plain text."""
+    import json as _json
     files = {"file": (filename, io.BytesIO(audio_bytes), content_type)}
     data = {"model": WHISPER_MODEL, "response_format": "text"}
     with httpx.Client(timeout=60) as c:
         r = c.post(f"{WHISPER_ENDPOINT}/audio/transcriptions", files=files, data=data)
     r.raise_for_status()
-    text = r.text.strip()
-    return text
+    raw = r.text.strip()
+    # vLLM returns JSON even when response_format=text; parse defensively
+    if raw.startswith("{"):
+        try:
+            return _json.loads(raw).get("text", raw).strip()
+        except Exception:
+            pass
+    return raw
 
 
 def transcribe_file(path: str) -> str:

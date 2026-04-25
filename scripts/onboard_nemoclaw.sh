@@ -3,6 +3,7 @@
 # Points NemoClaw at our Mistral 24B (planner) endpoint.
 
 set -euo pipefail
+export PATH="$HOME/.local/bin:$PATH"
 
 NEMOCLAW_PROVIDER=custom \
 NEMOCLAW_ENDPOINT_URL=http://localhost:9002/v1 \
