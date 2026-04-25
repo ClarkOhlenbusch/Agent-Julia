@@ -184,6 +184,42 @@ class HuddleDetector:
         self._running = False
 
 
+def make_callbacks(channel_id: str):
+    """
+    Build the on_start / on_stop callbacks that wire the huddle detector
+    into the Juliah pipeline.
+
+    on_start:
+      - Posts "Juliah joined" notification to Slack
+      - Returns a fresh HuddleSession (caller should store it)
+
+    on_stop:
+      - Ends the session
+      - Generates + posts meeting summary to Slack
+    """
+    from meeting_summary import post_join_notification, post_end_summary
+    from session import HuddleSession
+
+    # Mutable container so the closure can share state
+    state: dict = {"session": None}
+
+    async def on_start() -> "HuddleSession":
+        session = HuddleSession(channel_id=channel_id)
+        state["session"] = session
+        await post_join_notification(channel_id)
+        return session
+
+    async def on_stop() -> None:
+        session: HuddleSession | None = state.get("session")
+        if session is None:
+            return
+        session.end()
+        await post_end_summary(session)
+        state["session"] = None
+
+    return on_start, on_stop
+
+
 # ------------------------------------------------------------------
 # Standalone smoke-test: python huddle_detector.py
 # ------------------------------------------------------------------
@@ -192,10 +228,10 @@ async def _smoke_test() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     async def on_start() -> None:
-        print(">>> HUDDLE STARTED — would begin mic capture now")
+        print(">>> HUDDLE STARTED — would post join notification + begin listening")
 
     async def on_stop() -> None:
-        print(">>> HUDDLE ENDED — would stop mic capture now")
+        print(">>> HUDDLE ENDED — would generate summary + post to Slack")
 
     print("Running huddle detector. Start/stop a Slack huddle to test. Ctrl+C to quit.")
     detector = HuddleDetector(on_start=on_start, on_stop=on_stop)
