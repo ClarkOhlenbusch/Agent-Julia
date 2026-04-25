@@ -16,7 +16,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from config import AGENT_BASE_URL, AGENT_MODEL
-from schema import ToolResult, TaskType
+from schema import ToolResult
 from session import HuddleSession
 
 log = logging.getLogger(__name__)
@@ -58,22 +58,13 @@ async def _generate_summary(transcript: str) -> str:
         return "• (Summary generation failed — see transcript for details.)"
 
 
-def _action_emoji(task_type: TaskType) -> str:
-    return {
-        TaskType.send_email:            "📧",
-        TaskType.post_slack:            "💬",
-        TaskType.create_calendar_event: "📅",
-    }.get(task_type, "✅")
-
-
 def _format_actions(actions: List[ToolResult]) -> str:
     if not actions:
         return "_No actions taken._"
     lines = []
     for r in actions:
-        emoji  = _action_emoji(r.tool)
         status = "✅" if r.success else "❌"
-        lines.append(f"{status} {emoji} {r.message}")
+        lines.append(f"{status} 💬 {r.message}")
     return "\n".join(lines)
 
 
@@ -83,7 +74,7 @@ def _build_blocks(summary: str, actions: List[ToolResult], duration: str) -> lis
     return [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "👋 Juliah left the huddle", "emoji": True},
+            "text": {"type": "plain_text", "text": "👋 Julia left the huddle", "emoji": True},
         },
         {"type": "divider"},
         {
