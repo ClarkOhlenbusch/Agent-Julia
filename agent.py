@@ -30,7 +30,6 @@ console = Console()
 # Throttle interjections to avoid annoying false positives.
 MIN_INTERJECT_GAP_S = 30.0
 _last_interject_at = 0.0
-_chunks_since_extract = 0
 _pending_confirmation: Optional[dict] = None
 
 # Files consumed by the laptop-side Tivoo relay (visual + audio).
@@ -69,7 +68,7 @@ def _write_result(message: str) -> None:
 
 def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
     """Process one transcript chunk. Returns a status dict for UI/logging."""
-    global _last_interject_at, _chunks_since_extract, _pending_confirmation
+    global _last_interject_at, _pending_confirmation
     now = time.time()
     if not text.strip():
         return {"action": "skip_empty"}
@@ -101,18 +100,21 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
         else:
             return {"action": "unclear"}
 
-    # Standard flow: store transcript chunk, triage, branch.
+    # Always buffer in episodic (rolling 10-min in-memory)
     memory.episodic_write(text, speaker=speaker)
-    _chunks_since_extract += 1
 
     decision = middleware.decide(text, speaker=speaker)
     console.log(f"[bold]TRIAGE[/]: {decision.route.value} ({decision.confidence:.2f}) — {decision.reason}")
 
     out = {"action": decision.route.value.lower(), "decision": decision.model_dump()}
 
-    if decision.route == TriageRoute.ACT and (now - _last_interject_at) >= MIN_INTERJECT_GAP_S:
+    if decision.route == TriageRoute.STORE:
+        # Promote to long-term semantic memory via fact extraction
+        threading.Thread(target=fact_extractor.extract, kwargs={"force": True}, daemon=True).start()
+        console.log("[dim]STORE → fact extraction triggered[/]")
+
+    elif decision.route == TriageRoute.ACT and (now - _last_interject_at) >= MIN_INTERJECT_GAP_S:
         _write_state("thinking")
-        # Determine likely attendees from recent speakers
         recent = memory.episodic_recent(10)
         speakers = list({c.get("speaker") for c in recent if c.get("speaker") and c["speaker"] != "agent"})
         proposal = planner.plan(text, attendees_hint=speakers or None)
@@ -125,10 +127,7 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
         _write_question(question)
         out.update({"proposal": proposal.model_dump(), "question": question})
 
-    # Periodic fact extraction
-    if _chunks_since_extract >= 10:
-        threading.Thread(target=fact_extractor.extract, daemon=True).start()
-        _chunks_since_extract = 0
+    # DISCARD: nothing beyond the episodic buffer
 
     return out
 

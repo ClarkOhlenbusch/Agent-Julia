@@ -142,7 +142,6 @@ def _is_missing_chroma_collection(exc: Exception) -> bool:
 def _refresh_memory_handles() -> None:
     # Chroma collection objects cache server-side UUIDs. If another handler
     # deletes/recreates collections, the cached object can point at a dead UUID.
-    memory._episodic = None
     memory._semantic = None
     memory._ensure()
 
