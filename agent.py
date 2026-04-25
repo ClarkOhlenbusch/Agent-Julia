@@ -1,147 +1,205 @@
-"""Orchestrator — wires Whisper → Triage → Plan → Sub-Agent → Voice (narration).
+"""
+Julia — main orchestrator.
 
-Flow:
-  - Triage classifies each transcript chunk: STORE | DISCARD | ACT.
-  - STORE: kick fact extractor in a background thread to promote noteworthy
-    items into long-term semantic memory.
-  - ACT: triage has already gated on mutual agreement, so we plan + execute
-    immediately, then narrate (past tense). No "may I?" round-trip.
-  - DISCARD: nothing.
+Two modes:
+  python agent.py                   → Slack huddle mode (production demo)
+  python agent.py --input audio.wav → WAV file test mode
+  python agent.py --text-script     → built-in text demo (no audio)
 
-Fact extractor runs in a background thread on STORE.
+Slack huddle mode:
+  1. HuddleDetector polls for an active Slack huddle on this machine.
+  2. Posts "Julia is listening now" to the channel.
+  3. Mic capture begins. Each Whisper chunk is triaged.
+  4. If ACT: plan a Slack message → post YES/NO card → wait → if YES post it.
+  5. Huddle ends → post meeting summary to the channel.
 """
 from __future__ import annotations
 
 import argparse
+import asyncio
 import io
+import logging
 import os
 import threading
 import time
 import wave
-from queue import Queue, Empty
 from typing import Optional
 
+from dotenv import load_dotenv
 from rich.console import Console
+
+load_dotenv()
 
 import memory
 import observability
 import transcription
-from agents import middleware, planner, voice_agent, sub_agent, fact_extractor
-from schema import TriageRoute, TaskProposal
+from agents import middleware as sync_middleware, planner as sync_planner
+from agents import voice_agent, sub_agent as sync_sub_agent, fact_extractor
+from confirmation import ask_confirmation, register_interaction_handlers
+from huddle_detector import HuddleDetector
+from meeting_summary import post_end_summary, post_join_notification
+from memory import MemoryStore
+from middleware import triage
+from planner import plan
+from schema import TriageAction, ConfirmationAction, TriageRoute
+from session import HuddleSession
+from sub_agent import execute
+from transcription import capture_and_transcribe
 
-# Initialize Datadog LLMObs at import time. No-op if env vars are unset.
-observability.ensure_llmobs_enabled()
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s — %(message)s",
+)
+log      = logging.getLogger("julia.agent")
+console  = Console()
 
-console = Console()
-
-# Throttle interjections to avoid annoying false positives.
+SLACK_APP_TOKEN     = os.environ.get("SLACK_APP_TOKEN", "")
+SLACK_BOT_TOKEN     = os.environ.get("SLACK_BOT_TOKEN", "")
 MIN_INTERJECT_GAP_S = 30.0
-_last_interject_at = 0.0
+_last_interject_at  = 0.0
 
-# Files consumed by the laptop-side Tivoo relay (visual + audio).
-STATE_FILE = "/tmp/jarvis_state.txt"
-QUESTION_FILE = "/tmp/jarvis_question.txt"
-RESULT_FILE = "/tmp/jarvis_result.txt"
-TTS_MUTE_DURATION_S = 8.0  # drop mic input for this long after TTS fires
-
-_tts_started_at = 0.0
+STATE_FILE    = "/tmp/jarvis_state.txt"
+RESULT_FILE   = "/tmp/jarvis_result.txt"
 
 
 def _write_state(state: str) -> None:
-    global _tts_started_at
     try:
         with open(STATE_FILE, "w") as f:
             f.write(state)
     except Exception:
         pass
-    if state in ("speaking", "booked"):
-        _tts_started_at = time.time()
-
-
-def is_tts_active() -> bool:
-    return (time.time() - _tts_started_at) < TTS_MUTE_DURATION_S
-
-
-def _write_question(question: str) -> None:
-    """Stamps a fresh interjection question for the laptop voice relay to TTS."""
-    try:
-        import time as _t
-        with open(QUESTION_FILE, "w") as f:
-            f.write(f"{_t.time():.0f}\t{question}")
-    except Exception:
-        pass
 
 
 def _write_result(message: str) -> None:
-    """Stamps an executed-action confirmation for the laptop voice relay to TTS."""
     try:
-        import time as _t
         with open(RESULT_FILE, "w") as f:
-            f.write(f"{_t.time():.0f}\t{message}")
+            f.write(f"{time.time():.0f}\t{message}")
     except Exception:
         pass
 
 
-def handle_chunk(text: str, speaker: Optional[str] = None,
-                 session_id: Optional[str] = None) -> dict:
-    """Process one transcript chunk. Returns a status dict for UI/logging."""
+# ============================================================================
+# Slack huddle mode — async JuliaAgent
+# ============================================================================
+
+class JuliaAgent:
+    def __init__(self) -> None:
+        self._memory       = MemoryStore()
+        self._session: HuddleSession | None = None
+        self._stop_mic     = asyncio.Event()
+        self._bolt_app     = None
+        self._bolt_handler = None
+
+    async def on_huddle_start(self, channel_id: str) -> None:
+        log.info("Huddle started")
+        self._session  = HuddleSession(channel_id=channel_id)
+        self._stop_mic = asyncio.Event()
+        await post_join_notification(channel_id)
+        asyncio.create_task(
+            capture_and_transcribe(self._on_transcript, self._stop_mic),
+            name="mic_capture",
+        )
+
+    async def on_huddle_stop(self, channel_id: str) -> None:
+        log.info("Huddle ended")
+        self._stop_mic.set()
+        if self._session:
+            self._session.end()
+            await post_end_summary(self._session)
+            self._session = None
+
+    async def _on_transcript(self, text: str) -> None:
+        if not self._session:
+            return
+
+        self._session.add_transcript(text)
+        self._memory.write_episodic(text)
+
+        context  = self._memory.context_for(text)
+        decision = await triage(text, context)
+
+        if decision.action != TriageAction.ACT:
+            return
+
+        try:
+            proposal = await plan(text, context)
+        except Exception as exc:
+            log.error("Planner failed: %s", exc)
+            return
+
+        intent = await ask_confirmation(proposal)
+
+        if intent.action == ConfirmationAction.YES:
+            result = await execute(proposal, self._memory)
+            self._session.add_action(result)
+        else:
+            self._memory.write_episodic(f"[rejected] {proposal.voice_prompt}")
+
+    async def run(self) -> None:
+        if SLACK_APP_TOKEN:
+            from slack_bolt.async_app import AsyncApp
+            from slack_bolt.adapter.socket_mode.async_handler import AsyncSocketModeHandler
+            self._bolt_app = AsyncApp(token=SLACK_BOT_TOKEN)
+            register_interaction_handlers(self._bolt_app)
+            self._bolt_handler = AsyncSocketModeHandler(self._bolt_app, SLACK_APP_TOKEN)
+            asyncio.create_task(self._bolt_handler.start_async(), name="socket_mode")
+            log.info("Socket Mode active — button clicks enabled")
+        else:
+            log.info("No SLACK_APP_TOKEN — using reaction-poll fallback")
+
+        detector = HuddleDetector(
+            on_start=self.on_huddle_start,
+            on_stop=self.on_huddle_stop,
+        )
+
+        log.info("Julia is ready. Waiting for a Slack huddle…")
+        try:
+            await detector.run()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._stop_mic.set()
+            if self._bolt_handler:
+                await self._bolt_handler.close_async()
+
+
+# ============================================================================
+# File / text test modes (sync — for offline testing without a huddle)
+# ============================================================================
+
+def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
     global _last_interject_at
     now = time.time()
     if not text.strip():
         return {"action": "skip_empty"}
 
     _write_state("listening")
-
-    # Always buffer in episodic (rolling 10-min in-memory)
     memory.episodic_write(text, speaker=speaker)
 
-    sess = session_id or os.getenv("JARVIS_SESSION_ID", "live")
-
-    with observability.workflow(name="jarvis_voice_turn", session_id=sess) as span:
-        return _process_chunk_inner(text, speaker, now, span)
-
-
-def _process_chunk_inner(text: str, speaker: Optional[str], now: float, span) -> dict:
-    global _last_interject_at
-    decision = middleware.decide(text, speaker=speaker)
+    decision = sync_middleware.decide(text, speaker=speaker)
     console.log(f"[bold]TRIAGE[/]: {decision.route.value} ({decision.confidence:.2f}) — {decision.reason}")
 
     out = {"action": decision.route.value.lower(), "decision": decision.model_dump()}
 
     if decision.route == TriageRoute.STORE:
-        # Promote to long-term semantic memory via fact extraction
         threading.Thread(target=fact_extractor.extract, kwargs={"force": True}, daemon=True).start()
-        console.log("[dim]STORE → fact extraction triggered[/]")
 
     elif decision.route == TriageRoute.ACT and (now - _last_interject_at) >= MIN_INTERJECT_GAP_S:
-        # Triage already gated on mutual agreement. Plan + execute + narrate.
         _write_state("thinking")
-        recent = memory.episodic_recent(10)
+        recent   = memory.episodic_recent(10)
         speakers = list({c.get("speaker") for c in recent if c.get("speaker") and c["speaker"] != "agent"})
-        proposal = planner.plan(text, attendees_hint=speakers or None)
+        proposal = sync_planner.plan(text, attendees_hint=speakers or None)
         console.log(f"[bold magenta]PLAN[/]: {proposal.task_type.value} — {proposal.summary}")
-
-        # Execute first, then narrate the result
-        result = sub_agent.execute(proposal)
+        result   = sync_sub_agent.execute(proposal)
         console.log(f"[bold green]EXECUTED[/]: {result}")
         _last_interject_at = now
         _write_state("booked")
-
         try:
             narration = voice_agent.compose_narration(proposal, result)
         except Exception as e:
-            console.log(f"[yellow]narration compose failed[/]: {e}")
             narration = f"Done. {result.message}"
-        console.log(f"[bold blue]NARRATE[/]: {narration}")
-        _write_state("speaking")
         _write_result(narration)
-        out.update({
-            "proposal": proposal.model_dump(),
-            "result": result.model_dump(),
-            "narration": narration,
-        })
-
-    # DISCARD: nothing beyond the episodic buffer
+        out.update({"proposal": proposal.model_dump(), "result": result.model_dump()})
 
     observability.annotate(
         span,
@@ -152,16 +210,11 @@ def _process_chunk_inner(text: str, speaker: Optional[str], now: float, span) ->
     return out
 
 
-# ============================================================================
-# Modes
-# ============================================================================
-
 def chunk_wav(path: str, chunk_seconds: float = 4.0):
-    """Yield audio chunks (bytes) from a WAV file."""
     with wave.open(path, "rb") as w:
-        frame_rate = w.getframerate()
-        n_channels = w.getnchannels()
-        sample_width = w.getsampwidth()
+        frame_rate     = w.getframerate()
+        n_channels     = w.getnchannels()
+        sample_width   = w.getsampwidth()
         frames_per_chunk = int(frame_rate * chunk_seconds)
         idx = 0
         while True:
@@ -179,23 +232,20 @@ def chunk_wav(path: str, chunk_seconds: float = 4.0):
 
 
 def run_file(path: str, fake_speakers: Optional[list[str]] = None) -> None:
-    """Run the agent over a recorded WAV — alternates speakers if specified."""
     speakers = fake_speakers or ["speaker_1", "speaker_2"]
     for idx, chunk in chunk_wav(path):
         console.rule(f"chunk {idx}")
-        text = transcription.transcribe_bytes(chunk, filename=f"chunk_{idx}.wav")
-        speaker = speakers[idx % len(speakers)]
+        text     = transcription.transcribe_bytes(chunk, filename=f"chunk_{idx}.wav")
+        speaker  = speakers[idx % len(speakers)]
         console.log(f"[dim]TRANSCRIPT[/dim] [{speaker}] {text!r}")
         if not text.strip():
             continue
         handle_chunk(text, speaker=speaker)
         time.sleep(0.1)
     console.rule("done")
-    console.log(f"episodic={memory.episodic_count()} semantic={memory.semantic_count()}")
 
 
 def run_text(snippets: list[tuple[str, str]]) -> None:
-    """Run over a list of (speaker, text) tuples — for offline testing without audio."""
     for i, (sp, txt) in enumerate(snippets):
         console.rule(f"chunk {i}: [{sp}] {txt!r}")
         handle_chunk(txt, speaker=sp)
@@ -203,18 +253,15 @@ def run_text(snippets: list[tuple[str, str]]) -> None:
 
 
 # ============================================================================
-# CLI
+# Entry point
 # ============================================================================
 
 def main() -> None:
     p = argparse.ArgumentParser()
-    p.add_argument("--input", help="WAV file to feed through the pipeline")
-    p.add_argument("--text-script", action="store_true",
-                   help="Run a built-in text-only demo script (no audio).")
-    p.add_argument("--seed", action="store_true",
-                   help="Seed semantic memory from data/seed_facts.json before running.")
-    p.add_argument("--reset", action="store_true",
-                   help="Wipe both memory collections before running.")
+    p.add_argument("--input",       help="WAV file to feed through the pipeline")
+    p.add_argument("--text-script", action="store_true", help="Run built-in text demo (no audio)")
+    p.add_argument("--seed",        action="store_true", help="Seed semantic memory before running")
+    p.add_argument("--reset",       action="store_true", help="Wipe memory collections before running")
     args = p.parse_args()
 
     if args.reset:
@@ -227,14 +274,13 @@ def main() -> None:
     if args.input:
         run_file(args.input)
     elif args.text_script:
-        # Demonstrates mutual-agreement gating: first chunk should STORE only,
-        # second (with confirmation) should ACT → plan → execute → narrate.
         run_text([
             ("alex", "Yo, want to grab drinks at 7:30 tonight near Fort Point?"),
             ("sam",  "Yeah, sounds great, let's do it"),
         ])
     else:
-        p.print_help()
+        # Default: Slack huddle mode
+        asyncio.run(JuliaAgent().run())
 
 
 if __name__ == "__main__":
