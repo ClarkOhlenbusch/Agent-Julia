@@ -1,182 +1,181 @@
 """
 macOS Slack huddle detector.
 
-Polls every POLL_INTERVAL seconds to check whether a Slack huddle is active
-on the local machine. When the state transitions, it fires async callbacks:
+Polls every POLL_INTERVAL seconds. When a Slack huddle becomes active,
+reads the channel name from Slack's window title, resolves it to a channel ID
+via the Slack API, then fires callbacks — no manual channel config needed.
 
-  on_start()  — huddle just became active  → begin mic capture
-  on_stop()   — huddle just ended          → stop mic capture
-
-Detection strategy (tried in order):
-  1. AppleScript — looks for Slack's floating huddle window by title/role
-  2. lsof        — checks whether the Slack process has an audio device open
-  3. CoreAudio   — checks which PIDs have audio input streams open (macOS only)
-
-Usage:
-  detector = HuddleDetector(on_start=..., on_stop=...)
-  await detector.run()   # blocks; runs until cancelled
+  on_start(channel_id)  — huddle just became active
+  on_stop(channel_id)   — huddle just ended
 """
 
 import asyncio
 import logging
 import os
 import re
-import subprocess
 from typing import Callable, Coroutine
+
+import httpx
 
 log = logging.getLogger(__name__)
 
-POLL_INTERVAL = float(os.environ.get("HUDDLE_POLL_INTERVAL", "2.0"))
+POLL_INTERVAL   = float(os.environ.get("HUDDLE_POLL_INTERVAL", "2.0"))
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 
-StartCallback = Callable[[], Coroutine]
-StopCallback  = Callable[[], Coroutine]
+StartCallback = Callable[[str], Coroutine]
+StopCallback  = Callable[[str], Coroutine]
 
-# AppleScript: returns "true" if Slack has a huddle-related window open.
-# Slack's huddle UI shows a floating toolbar whose title contains "Huddle"
-# or an accessibility description containing "huddle". We check both.
-_APPLESCRIPT = """
+# AppleScript: returns the Slack window title that contains "Huddle", or "".
+# Slack's window title during a huddle looks like: "# channel-name | Workspace"
+_APPLESCRIPT_HUDDLE_WINDOW = """
 tell application "System Events"
-    if not (exists process "Slack") then return "false"
+    if not (exists process "Slack") then return ""
     tell process "Slack"
         set allWindows to name of every window
         repeat with wName in allWindows
             if wName contains "Huddle" or wName contains "huddle" then
-                return "true"
+                return wName as string
             end if
         end repeat
-        -- Also check UI elements for the floating huddle bar
-        try
-            set uiElems to description of every UI element of window 1
-            repeat with d in uiElems
-                if d contains "huddle" then return "true"
-            end repeat
-        end try
     end tell
-    return "false"
+    return ""
 end tell
 """
 
 
-async def _check_applescript() -> bool:
-    """Return True if Slack shows a huddle window (macOS only)."""
+async def _get_huddle_window_title() -> str:
+    """Return the Slack window title if a huddle is active, else empty string."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "osascript", "-e", _APPLESCRIPT,
+            "osascript", "-e", _APPLESCRIPT_HUDDLE_WINDOW,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        return stdout.decode().strip() == "true"
+        return stdout.decode().strip()
     except (asyncio.TimeoutError, FileNotFoundError):
-        return False
+        return ""
 
 
-async def _slack_pid() -> int | None:
-    """Return the PID of the main Slack process, or None if not running."""
+def _parse_channel_name(window_title: str) -> str | None:
+    """
+    Extract a channel name from a Slack window title.
+    Examples:
+      "Huddle | # team-standup | Acme Workspace"  → "team-standup"
+      "# general – Huddle"                         → "general"
+    """
+    # Match "# channel-name" anywhere in the title
+    m = re.search(r"#\s*([\w\-]+)", window_title)
+    return m.group(1) if m else None
+
+
+async def _resolve_channel_id(channel_name: str) -> str | None:
+    """
+    Call conversations.list to find the channel ID for a given name.
+    Returns None if the bot isn't in the channel or the token is missing.
+    """
+    if not SLACK_BOT_TOKEN:
+        return None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "pgrep", "-x", "Slack",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await proc.communicate()
-        pids = stdout.decode().split()
-        return int(pids[0]) if pids else None
-    except (ValueError, FileNotFoundError):
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                params={"types": "public_channel,private_channel", "limit": 200},
+            )
+            data = resp.json()
+            if not data.get("ok"):
+                log.warning("conversations.list error: %s", data.get("error"))
+                return None
+            for ch in data.get("channels", []):
+                if ch.get("name") == channel_name:
+                    return ch["id"]
+    except Exception as exc:
+        log.warning("Could not resolve channel name %r: %s", channel_name, exc)
+    return None
+
+
+async def _detect_active_channel() -> str | None:
+    """
+    Full detection pipeline:
+      1. AppleScript → window title
+      2. Parse channel name from title
+      3. Resolve name → channel ID via Slack API
+    Returns the channel ID string, or None if no huddle detected.
+    """
+    title = await _get_huddle_window_title()
+    if not title:
         return None
 
+    channel_name = _parse_channel_name(title)
+    if not channel_name:
+        log.debug("Huddle detected but could not parse channel name from: %r", title)
+        # Fall back to posting to first channel we find with an active huddle
+        return await _fallback_find_huddle_channel()
 
-async def _check_lsof() -> bool:
+    channel_id = await _resolve_channel_id(channel_name)
+    if channel_id:
+        log.debug("Resolved #%s → %s", channel_name, channel_id)
+    return channel_id
+
+
+async def _fallback_find_huddle_channel() -> str | None:
     """
-    Return True if the Slack process has an audio device file open.
-    Matches /dev/audio*, CoreAudio virtual devices, or 'audio' in the path.
+    If window title parsing fails, scan conversations.list for a channel
+    that has an active huddle (Slack marks these with has_ongoing_call=True).
     """
-    pid = await _slack_pid()
-    if pid is None:
-        return False
+    if not SLACK_BOT_TOKEN:
+        return None
     try:
-        proc = await asyncio.create_subprocess_exec(
-            "lsof", "-p", str(pid), "-n", "-P",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        output = stdout.decode()
-        # CoreAudio on macOS shows up as character device files like /dev/audiopipe*
-        # or as named pipes used by coreaudiod
-        return bool(re.search(r"(audio|coreaudio|snd)", output, re.IGNORECASE))
-    except (asyncio.TimeoutError, FileNotFoundError):
-        return False
-
-
-async def _check_coreaudio_mic() -> bool:
-    """
-    Use ioreg to check if any audio engine reports an active input client
-    belonging to Slack. Less reliable but a useful third signal on macOS.
-    """
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ioreg", "-l", "-n", "AppleHDAEngineInput",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        return b"Slack" in stdout
-    except (asyncio.TimeoutError, FileNotFoundError):
-        return False
-
-
-async def is_huddle_active() -> bool:
-    """
-    Aggregate check: returns True if any detection strategy says a huddle
-    is active. Tries strategies in order and short-circuits on first True.
-    """
-    strategies = [_check_applescript, _check_lsof, _check_coreaudio_mic]
-    for strategy in strategies:
-        try:
-            if await strategy():
-                return True
-        except Exception as exc:
-            log.debug("Detection strategy %s failed: %s", strategy.__name__, exc)
-    return False
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                "https://slack.com/api/conversations.list",
+                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}"},
+                params={"types": "public_channel,private_channel", "limit": 200},
+            )
+            data = resp.json()
+            for ch in data.get("channels", []):
+                if ch.get("has_ongoing_call") or ch.get("is_open"):
+                    return ch["id"]
+    except Exception as exc:
+        log.warning("Fallback huddle channel search failed: %s", exc)
+    return None
 
 
 class HuddleDetector:
     def __init__(self, on_start: StartCallback, on_stop: StopCallback):
-        self.on_start     = on_start
-        self.on_stop      = on_stop
-        self._was_active  = False
-        self._running     = False
+        self.on_start        = on_start
+        self.on_stop         = on_stop
+        self._active_channel: str | None = None
+        self._running        = False
 
     async def run(self) -> None:
-        """Poll until cancelled. Fires on_start / on_stop on state transitions."""
         self._running = True
-        log.info(
-            "Huddle detector polling every %.1fs (AppleScript → lsof → CoreAudio)",
-            POLL_INTERVAL,
-        )
+        log.info("Huddle detector polling every %.1fs", POLL_INTERVAL)
+
         while self._running:
             try:
-                active = await is_huddle_active()
+                channel_id = await _detect_active_channel()
 
-                if active and not self._was_active:
-                    log.info("Slack huddle detected — starting Jarvis")
-                    self._was_active = True
+                if channel_id and not self._active_channel:
+                    log.info("Huddle started in %s — activating Juliah", channel_id)
+                    self._active_channel = channel_id
                     try:
-                        await self.on_start()
+                        await self.on_start(channel_id)
                     except Exception as exc:
-                        log.error("on_start callback failed: %s", exc)
+                        log.error("on_start failed: %s", exc)
 
-                elif not active and self._was_active:
-                    log.info("Slack huddle ended — stopping Jarvis")
-                    self._was_active = False
+                elif not channel_id and self._active_channel:
+                    log.info("Huddle ended in %s — stopping Juliah", self._active_channel)
+                    stopped_channel      = self._active_channel
+                    self._active_channel = None
                     try:
-                        await self.on_stop()
+                        await self.on_stop(stopped_channel)
                     except Exception as exc:
-                        log.error("on_stop callback failed: %s", exc)
+                        log.error("on_stop failed: %s", exc)
 
             except Exception as exc:
-                log.warning("Huddle detection error (will retry): %s", exc)
+                log.warning("Detection error (will retry): %s", exc)
 
             await asyncio.sleep(POLL_INTERVAL)
 
@@ -184,32 +183,22 @@ class HuddleDetector:
         self._running = False
 
 
-def make_callbacks(channel_id: str):
+def make_callbacks():
     """
-    Build the on_start / on_stop callbacks that wire the huddle detector
-    into the Juliah pipeline.
-
-    on_start:
-      - Posts "Juliah joined" notification to Slack
-      - Returns a fresh HuddleSession (caller should store it)
-
-    on_stop:
-      - Ends the session
-      - Generates + posts meeting summary to Slack
+    Build on_start / on_stop callbacks that wire the detector into Juliah.
+    Channel ID is passed in automatically — no config needed.
     """
     from meeting_summary import post_join_notification, post_end_summary
     from session import HuddleSession
 
-    # Mutable container so the closure can share state
     state: dict = {"session": None}
 
-    async def on_start() -> "HuddleSession":
+    async def on_start(channel_id: str) -> None:
         session = HuddleSession(channel_id=channel_id)
         state["session"] = session
         await post_join_notification(channel_id)
-        return session
 
-    async def on_stop() -> None:
+    async def on_stop(channel_id: str) -> None:
         session: HuddleSession | None = state.get("session")
         if session is None:
             return
@@ -217,23 +206,23 @@ def make_callbacks(channel_id: str):
         await post_end_summary(session)
         state["session"] = None
 
-    return on_start, on_stop
+    return on_start, on_stop, state
 
 
 # ------------------------------------------------------------------
-# Standalone smoke-test: python huddle_detector.py
+# Standalone smoke-test
 # ------------------------------------------------------------------
 
 async def _smoke_test() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
-    async def on_start() -> None:
-        print(">>> HUDDLE STARTED — would post join notification + begin listening")
+    async def on_start(channel_id: str) -> None:
+        print(f">>> STARTED in channel {channel_id}")
 
-    async def on_stop() -> None:
-        print(">>> HUDDLE ENDED — would generate summary + post to Slack")
+    async def on_stop(channel_id: str) -> None:
+        print(f">>> STOPPED in channel {channel_id}")
 
-    print("Running huddle detector. Start/stop a Slack huddle to test. Ctrl+C to quit.")
+    print("Start/stop a Slack huddle to test. Ctrl+C to quit.")
     detector = HuddleDetector(on_start=on_start, on_stop=on_stop)
     try:
         await detector.run()

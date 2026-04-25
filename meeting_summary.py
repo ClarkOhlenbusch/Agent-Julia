@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 DRY_RUN         = os.environ.get("DRY_RUN", "false").lower() == "true"
+# Channel is detected automatically from the active huddle — no manual config needed
 
 _client = AsyncOpenAI(base_url=AGENT_BASE_URL, api_key="vllm")
 
