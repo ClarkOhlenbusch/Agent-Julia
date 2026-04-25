@@ -13,7 +13,7 @@
 
 A proactive voice agent that **listens** to a live conversation, **decides** when to interject, **confirms** with the user before acting, **executes** the chosen task (send email, post to Slack, create calendar invite), and **gets smarter over time** through a two-tier memory system that distills noteworthy moments into long-term semantic memory. Built on Red Hat AI quantized models served by vLLM, sandboxed by NemoClaw, running on a single A100 80GB Brev instance.
 
-The judging story: *"Most agent demos are tool-callers in a wrapper. We built a continuous-listening, plan-confirm-execute pipeline with a two-tier memory system — episodic for immediate recall, semantic for accumulated social context — that actually feels like a participant who's been in the room with you. Every model in the stack — STT, triage, planner/executor, fact extractor — runs on Red Hat AI's quantized weights through vLLM, on a single A100. NemoClaw sandboxes the agent so even prompt-injected calendar events can't exfil data."*
+Most agent demos are tool-callers in a wrapper. We built a continuous-listening, plan-confirm-execute pipeline with a two-tier memory system — episodic for immediate recall, semantic for accumulated social context — that actually feels like a participant who's been in the room with you. Every model in the stack — STT, triage, planner/executor, fact extractor — runs on Red Hat AI's quantized weights through vLLM, on a single A100. NemoClaw sandboxes the agent so even prompt-injected calendar events can't exfil data.
 
 ---
 
