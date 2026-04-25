@@ -13,6 +13,227 @@ The judging story: *"Most agent demos are tool-callers in a wrapper. We built a 
 
 ---
 
+## Current DAG Service In This Branch
+
+The code on branch `dag_orchestration` includes a working FastAPI service that exposes a small orchestration DAG for three task domains:
+
+- `email`
+- `slack`
+- `calendar`
+
+This implementation is intentionally narrower than the full hackathon plan above. It is the current runnable service in this repo and lives in:
+
+- `main.py`
+- `julia_dag/config.py`
+- `julia_dag/schemas.py`
+- `julia_dag/orchestrator.py`
+
+### API surface
+
+The service exposes two endpoints:
+
+- `GET /health`
+  - Returns a simple readiness payload: `{ "status": "ok", "app": "<app_name>" }`
+- `POST /invoke`
+  - Accepts an orchestration request and returns the DAG plan, selected channels, per-channel results, and execution trace
+
+Example request:
+
+```json
+{
+  "session_id": "demo-session-1",
+  "instruction": "Email the client, notify the team in Slack, and create a calendar invite.",
+  "source": "proxy",
+  "user_id": "user-123",
+  "metadata": {}
+}
+```
+
+Example response shape:
+
+```json
+{
+  "session_id": "demo-session-1",
+  "instruction": "Email the client, notify the team in Slack, and create a calendar invite.",
+  "normalized_instruction": "email the client, notify the team in slack, and create a calendar invite.",
+  "selected_channels": ["email", "slack", "calendar"],
+  "plan": [
+    {
+      "channel": "email",
+      "should_run": true,
+      "confidence": 0.92,
+      "reason": "email-specific language detected"
+    }
+  ],
+  "results": [
+    {
+      "channel": "email",
+      "action": "draft_email",
+      "status": "planned",
+      "detail": "Email model should prepare a draft or reply based on: ...",
+      "model_stub": "email-agent-stub"
+    }
+  ],
+  "trace_steps": [
+    "normalized_instruction",
+    "plan",
+    "selected_channels",
+    "email_result",
+    "slack_result",
+    "calendar_result"
+  ]
+}
+```
+
+### DAG nodes and execution order
+
+The current orchestration DAG is built in `julia_dag/orchestrator.py` and always runs the same six-node graph:
+
+1. `normalized_instruction`
+2. `plan`
+3. `selected_channels`
+4. `email_result`
+5. `slack_result`
+6. `calendar_result`
+
+The dependencies are:
+
+```text
+normalized_instruction
+  -> plan
+    -> selected_channels
+normalized_instruction + plan
+  -> email_result
+  -> slack_result
+  -> calendar_result
+```
+
+At runtime:
+
+1. `normalize_instruction()` trims whitespace, lowercases text, and compresses repeated spaces.
+2. `plan_channels()` decides which domains should run.
+3. `select_channels()` extracts only the channels whose `should_run` flag is `true`.
+4. Each specialist node returns either a `planned` action for its domain or a `skipped` noop result.
+5. The DAG executor records the final `trace_steps` list so downstream systems can see the exact order of execution.
+
+### Channel selection logic
+
+Routing is keyword- and phrase-based today. The planner does not call an LLM yet; it uses deterministic matching so behavior is predictable and easy to smoke test.
+
+Current matching rules:
+
+- Email is selected for explicit email language such as `email`, `mail`, `inbox`, `send email`, or `reply to email`
+- Slack is selected for explicit Slack/chat language such as `slack`, `dm`, `channel`, `slack message`, `post in slack`, `reply in slack`, or `ping in slack`
+- Calendar is selected for explicit scheduling language such as `calendar`, `schedule`, `reschedule`, `invite`, or calendar-specific event creation phrasing
+
+Important behavior:
+
+- Multi-intent instructions can select multiple channels in one request
+- If no strong domain match is found, the DAG falls back to `slack`
+- The implementation intentionally avoids broad verbs like `send` or nouns like `meeting` by themselves because they caused false positives during testing
+
+Examples:
+
+- `"Send an email to the customer"` -> `["email"]`
+- `"Ping the team in Slack about the deploy"` -> `["slack"]`
+- `"Schedule a meeting for tomorrow afternoon"` -> `["calendar"]`
+- `"Email the client, notify the team in Slack, and create a calendar invite"` -> `["email", "slack", "calendar"]`
+- `"Please follow up with the team about this"` -> `["slack"]` fallback
+
+### Per-channel outputs
+
+The current specialists are stubs that represent future domain agents:
+
+- Email specialist -> `draft_email`
+- Slack specialist -> `compose_slack_message`
+- Calendar specialist -> `schedule_calendar_change`
+
+Each returns a `ChannelResult` with:
+
+- `channel`
+- `action`
+- `status`
+- `detail`
+- `model_stub`
+
+This gives the service a stable response contract now while leaving room for real downstream tool execution later.
+
+### Datadog LLM Observability integration
+
+The branch also includes Datadog LLM Observability instrumentation around each orchestration request.
+
+Configuration is loaded from `.env` by `julia_dag/config.py`:
+
+- `DD_LLMOBS_ENABLED`
+- `DD_LLMOBS_ML_APP`
+- `DD_SITE`
+- `DD_API_KEY`
+- `DD_APP_KEY` optional
+- `DD_ENV` optional
+- `DD_SERVICE` optional
+
+When `handle_request()` runs:
+
+1. `ensure_llmobs_enabled()` enables `ddtrace.llmobs.LLMObs`
+2. If an API key is present, the code enables agentless submission to Datadog LLM Observability
+3. The request is wrapped in `LLMObs.workflow(name="julia_orchestration_dag", session_id=request.session_id)`
+4. The service annotates the span with:
+   - `input_data`: the full request payload
+   - `output_data`: the full orchestration response payload
+   - `metadata`: request `source` and `user_id`
+
+That means a single `/invoke` request can be inspected in Datadog with:
+
+- the original instruction
+- the selected channels
+- the returned plan and channel results
+- the exact DAG trace order
+- the session identifier used to correlate related requests
+
+In practice, this makes Datadog useful for both:
+
+- correctness debugging: "Did the DAG pick the right channels?"
+- observability: "What orchestration decisions happened for this session?"
+
+### What is and is not instrumented today
+
+Instrumented today:
+
+- the top-level orchestration workflow span
+- task and agent decorators on DAG helper functions in `julia_dag/orchestrator.py`
+- request/response payload annotation for `/invoke`
+
+Not implemented yet:
+
+- real LLM planner calls
+- real email/Slack/calendar API execution
+- NemoClaw runtime integration in this local FastAPI service
+- memory retrieval or Chroma-backed context injection in the runnable code path
+
+So the current branch should be understood as:
+
+- a working orchestration skeleton
+- a deterministic DAG router for three task domains
+- Datadog-instrumented request tracing around that DAG
+
+### Local smoke-test behavior
+
+The current service has been smoke tested for:
+
+- `GET /health`
+- valid multi-channel `/invoke` requests
+- valid single-channel `/invoke` requests
+- fallback `/invoke` requests with no explicit domain
+- invalid whitespace-only instructions returning `400`
+
+Datadog validation performed on this branch:
+
+- confirmed the service can enable `LLMObs`
+- confirmed live agentless submission to Datadog intake succeeds once a valid `DD_API_KEY` is present
+- observed separate local APM trace delivery attempts to `localhost:8126`, which are not required for LLM Observability itself
+
+---
+
 ## Track 5 Context
 
 | | |
