@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import threading
 import time
 import wave
@@ -44,6 +45,37 @@ SILENCE_RMS = float(os.getenv("JARVIS_SILENCE_RMS", "0.012"))
 DROP_RMS = float(os.getenv("JARVIS_DROP_RMS", "0.006"))
 MAX_BUFFER_S = 12.0
 OVERLAP_S = 0.20
+FORCE_ACT_COOLDOWN_S = 8.0
+
+
+_TIME_RE = re.compile(
+    r"\b(?:"
+    r"today|tonight|tomorrow|this week|next week|"
+    r"noon|morning|afternoon|evening|"
+    r"(?:at\s+)?(?:[1-9]|1[0-2])(?::[0-5][0-9])?\s*(?:a\.?m\.?|p\.?m\.?)"
+    r")\b",
+    re.IGNORECASE,
+)
+_TASK_TERMS = (
+    "drink",
+    "drinks",
+    "coffee",
+    "lunch",
+    "dinner",
+    "meeting",
+    "meet",
+    "sync",
+    "call",
+)
+_SCHEDULE_TERMS = (
+    "schedule",
+    "calendar",
+    "book",
+    "set up",
+    "put it on",
+    "let's do it",
+    "lets do it",
+)
 
 
 # --- live state for the UI ---
@@ -58,6 +90,7 @@ _AUDIO_RESULTS: Queue = Queue()
 _WORKER_STARTED = False
 _WORKER_BUSY = False
 _WORKER_LOCK = threading.Lock()
+_MEMORY_LOCK = threading.RLock()
 
 
 def log(line: str) -> None:
@@ -71,14 +104,14 @@ def render_log() -> str:
 
 
 def render_episodic() -> str:
-    items = memory.episodic_recent(20)
+    items = _memory_call("episodic render", lambda: memory.episodic_recent(20), default=[])
     if not items:
         return "(empty)"
     return "\n".join(f"[{c.get('speaker','?')}] {c['text']}" for c in items)
 
 
 def render_semantic() -> str:
-    items = memory.semantic_all()
+    items = _memory_call("semantic render", memory.semantic_all, default=[])
     if not items:
         return "(empty - pre-warm with Reload Seeds, or have a conversation)"
     lines = []
@@ -99,6 +132,90 @@ def render_calendar() -> str:
         f"  • {b['title']}  {b['start']} -> {b['end']}  attendees={b['attendees']}"
         for b in booked
     )
+
+
+def _is_missing_chroma_collection(exc: Exception) -> bool:
+    message = str(exc)
+    return "Collection [" in message and "does not exist" in message
+
+
+def _refresh_memory_handles() -> None:
+    # Chroma collection objects cache server-side UUIDs. If another handler
+    # deletes/recreates collections, the cached object can point at a dead UUID.
+    memory._episodic = None
+    memory._semantic = None
+    memory._ensure()
+
+
+def _memory_call(label: str, fn, default=None):
+    with _MEMORY_LOCK:
+        try:
+            return fn()
+        except Exception as exc:
+            if not _is_missing_chroma_collection(exc):
+                log(f"[memory error] {label}: {exc}")
+                return default
+            log(f"[memory] refreshed stale Chroma collection handles during {label}")
+            try:
+                _refresh_memory_handles()
+                return fn()
+            except Exception as retry_exc:
+                log(f"[memory error] {label} after refresh: {retry_exc}")
+                return default
+
+
+def _has_schedule_language(text: str) -> bool:
+    lowered = text.lower()
+    has_task = any(term in lowered for term in _TASK_TERMS)
+    has_schedule = any(term in lowered for term in _SCHEDULE_TERMS)
+    has_time = bool(_TIME_RE.search(text))
+    return (has_task and has_time) or (has_schedule and (has_task or has_time))
+
+
+def _should_force_act(text: str, out: dict) -> bool:
+    if out.get("action") in {"act", "executed", "rejected", "unclear"}:
+        return False
+    if getattr(agent, "_pending_confirmation", None):
+        return False
+    if not _has_schedule_language(text):
+        return False
+
+    # Keep the guardrail demo-safe without turning every passing mention into an
+    # interjection loop.
+    last_at = float(getattr(agent, "_last_interject_at", 0.0))
+    return (time.time() - last_at) >= FORCE_ACT_COOLDOWN_S
+
+
+def _force_schedule_act(text: str, out: dict) -> dict:
+    now = time.time()
+    agent._write_state("thinking")
+    recent = memory.episodic_recent(10)
+    speakers = list({c.get("speaker") for c in recent if c.get("speaker") and c["speaker"] != "agent"})
+
+    proposal = agent.planner.plan(text, attendees_hint=speakers or None)
+    question = agent.voice_agent.compose_question(proposal)
+    agent._pending_confirmation = {"proposal": proposal, "question": question, "asked_at": now}
+    agent._last_interject_at = now
+    agent._write_state("speaking")
+
+    out = dict(out)
+    out.update({
+        "action": "act",
+        "proposal": proposal.model_dump(),
+        "question": question,
+        "forced_act_reason": "clear scheduling language detected after non-ACT triage",
+    })
+    return out
+
+
+def _run_agent_chunk(text: str, speaker: str) -> dict | None:
+    def _run() -> dict:
+        out = agent.handle_chunk(text, speaker=speaker)
+        if _should_force_act(text, out):
+            return _force_schedule_act(text, out)
+        return out
+
+    return _memory_call("agent.handle_chunk", _run, default=None)
 
 
 def _new_audio_state() -> dict:
@@ -242,8 +359,9 @@ def _audio_worker_loop() -> None:
                 "speaker": job["speaker"],
                 "text": text,
             })
-            out = agent.handle_chunk(text, speaker=job["speaker"])
-            _AUDIO_RESULTS.put({"kind": "agent_result", "out": out})
+            out = _run_agent_chunk(text, speaker=job["speaker"])
+            if out is not None:
+                _AUDIO_RESULTS.put({"kind": "agent_result", "out": out})
         except Exception as e:
             _AUDIO_RESULTS.put({"kind": "log", "message": f"[audio worker error] {e}"})
         finally:
@@ -260,6 +378,8 @@ def _apply_agent_output(out: dict) -> None:
         confidence = float(decision.get("confidence", 0.0))
         reason = decision.get("reason", "")
         log(f"TRIAGE: {route} ({confidence:.2f}) - {reason}")
+    if out.get("forced_act_reason"):
+        log(f"TRIAGE OVERRIDE: {out['forced_act_reason']}")
 
     if out.get("action") == "act" and "question" in out:
         _LAST_QUESTION = out["question"]
@@ -406,8 +526,9 @@ def on_text_inject(text: str, speaker: str):
         live, ep, sem, question, result = _main_outputs(refresh_memory=False)
         return live, ep, sem, question, result
     log(f"[{speaker}] {text}")
-    out = agent.handle_chunk(text, speaker=speaker)
-    _apply_agent_output(out)
+    out = _run_agent_chunk(text, speaker=speaker)
+    if out is not None:
+        _apply_agent_output(out)
     return _main_outputs(refresh_memory=True)
 
 
@@ -426,7 +547,7 @@ def on_speak_question() -> Optional[str]:
 
 def on_reset_memory(state: Optional[dict]):
     global _LAST_QUESTION, _LAST_RESULT
-    memory.reset_all()
+    _memory_call("reset memory", memory.reset_all)
     cal_tool.reset_session()
     _LIVE_LOG.clear()
     _LAST_QUESTION = ""
@@ -438,7 +559,8 @@ def on_reset_memory(state: Optional[dict]):
 
 
 def on_seed():
-    n = memory.seed_from_file(os.path.join(os.path.dirname(__file__), "data/seed_facts.json"))
+    seed_path = os.path.join(os.path.dirname(__file__), "data/seed_facts.json")
+    n = _memory_call("seed memory", lambda: memory.seed_from_file(seed_path), default=0)
     log(f"[seed] +{n} semantic facts")
     return render_log(), render_episodic(), render_semantic()
 
