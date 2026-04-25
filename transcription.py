@@ -38,16 +38,43 @@ def _to_wav_bytes(audio: np.ndarray) -> bytes:
     return buf.read()
 
 
-async def transcribe_bytes(wav_bytes: bytes) -> str:
-    """Send raw WAV bytes to the vLLM Whisper endpoint, return transcript text."""
+async def _transcribe_bytes_async(wav_bytes: bytes, filename: str = "audio.wav") -> str:
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.post(
             f"{WHISPER_BASE_URL}/audio/transcriptions",
-            files={"file": ("audio.wav", wav_bytes, "audio/wav")},
+            files={"file": (filename, wav_bytes, "audio/wav")},
             data={"model": WHISPER_MODEL, "response_format": "text"},
         )
         resp.raise_for_status()
-        return resp.text.strip()
+        raw = resp.text.strip()
+        # vLLM returns JSON even when response_format=text; parse defensively
+        if raw.startswith("{"):
+            try:
+                import json as _json
+                return _json.loads(raw).get("text", raw).strip()
+            except Exception:
+                pass
+        return raw
+
+
+def transcribe_bytes(wav_bytes: bytes, filename: str = "audio.wav") -> str:
+    """Send raw WAV bytes to the vLLM Whisper endpoint, return transcript text.
+
+    Sync entry point — usable from threaded contexts (Gradio audio worker).
+    Internally schedules the async call. If we're already inside a running
+    event loop (e.g. someone awaits this from async code), they should use
+    _transcribe_bytes_async directly.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        return asyncio.run(_transcribe_bytes_async(wav_bytes, filename=filename))
+    # We're inside a running loop. Run in a thread so we don't deadlock.
+    import concurrent.futures as _cf
+    with _cf.ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(asyncio.run, _transcribe_bytes_async(wav_bytes, filename=filename)).result()
 
 
 async def capture_and_transcribe(callback, stop_event: asyncio.Event) -> None:
@@ -90,7 +117,7 @@ async def capture_and_transcribe(callback, stop_event: asyncio.Event) -> None:
 
             try:
                 wav_bytes = _to_wav_bytes(chunk.flatten())
-                text      = await transcribe_bytes(wav_bytes)
+                text      = await _transcribe_bytes_async(wav_bytes)
                 if text:
                     log.debug("Whisper: %r", text)
                     await callback(text)

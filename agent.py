@@ -340,7 +340,7 @@ def run_file(path: str, fake_speakers: Optional[list[str]] = None) -> None:
     import transcription as _stt
     for idx, chunk in chunk_wav(path):
         console.rule(f"chunk {idx}")
-        text = asyncio.run(_stt.transcribe_bytes(chunk))
+        text = _stt.transcribe_bytes(chunk)
         speaker = speakers[idx % len(speakers)]
         console.log(f"[dim]TRANSCRIPT[/dim] [{speaker}] {text!r}")
         if not text.strip():

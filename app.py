@@ -1,4 +1,4 @@
-"""Gradio UI for Jarvis. Runs on the Brev box, exposed via brev port-forward.
+"""Gradio UI for Julia. Runs on the Brev box, exposed via brev port-forward.
 
 Audio is continuously streamed from the browser microphone. The stream handler
 buffers short numpy chunks server-side and enqueues WAV segments for a
@@ -568,15 +568,39 @@ def on_seed():
 # UI
 # ============================================================================
 
+JULIA_CSS = """
+.gradio-container {
+    background: linear-gradient(135deg, #fff0f5 0%, #ffffff 50%, #fff0f5 100%) !important;
+}
+.gr-button-primary {
+    background-color: #e91e8c !important;
+    border-color: #e91e8c !important;
+}
+.gr-button {
+    border-color: #f06292 !important;
+    color: #c2185b !important;
+}
+.gr-button:hover {
+    background-color: #fce4ec !important;
+}
+footer { display: none !important; }
+"""
+
+
 def build_ui():
-    with gr.Blocks(title="Jarvis - Track 5 Agent") as app:
+    with gr.Blocks(title="Julia — Proactive Scheduling Agent", css=JULIA_CSS) as app:
         initial_audio_state = _new_audio_state()
         audio_state = gr.State(initial_audio_state)
-        gr.Markdown("# Jarvis - Proactive Scheduling Agent\n*TOA Track 5 · NemoClaw + vLLM + Red Hat AI*")
+        gr.Markdown(
+            "<div style='text-align:center'>"
+            "<h1 style='color:#e91e8c; margin-bottom:0'>💬 Julia</h1>"
+            "<p style='color:#f06292; margin-top:4px'><em>Proactive Scheduling Agent · vLLM + NemoClaw + Red Hat AI</em></p>"
+            "</div>"
+        )
 
         with gr.Row():
             with gr.Column(scale=2):
-                gr.Markdown("### Continuous Audio")
+                gr.Markdown("### 🎙️ Continuous Audio")
                 listen_status = gr.Markdown(_render_listening_status(initial_audio_state))
                 audio_in = gr.Audio(
                     sources=["microphone"],
@@ -585,36 +609,36 @@ def build_ui():
                     label="Live microphone",
                 )
                 with gr.Row():
-                    speaker_audio = gr.Dropdown(["user", "alex", "sam", "julie"], value="user", label="Speaker")
+                    speaker_audio = gr.Dropdown(["speaker_1", "speaker_2", "speaker_3"], value="speaker_1", label="Speaker")
                     btn_pause = gr.Button("Pause")
 
-                gr.Markdown("### Text inject (no mic)")
-                text_in = gr.Textbox(placeholder="Yo, want to grab drinks at 7:30?", lines=1)
+                gr.Markdown("### 💬 Text inject (no mic)")
+                text_in = gr.Textbox(placeholder="Want to grab drinks at 5:30?", lines=1)
                 with gr.Row():
-                    speaker_text = gr.Dropdown(["user", "alex", "sam", "julie"], value="user", label="Speaker")
+                    speaker_text = gr.Dropdown(["speaker_1", "speaker_2", "speaker_3"], value="speaker_1", label="Speaker")
                     btn_text = gr.Button("Inject", variant="primary")
 
-                gr.Markdown("### Pending interjection")
-                question_box = gr.Textbox(label="Agent's question (TTS source)", interactive=False)
+                gr.Markdown("### 🗣️ Julia's interjection")
+                question_box = gr.Textbox(label="Julia's question (TTS source)", interactive=False)
                 with gr.Row():
                     btn_speak = gr.Button("🔊 Speak it")
                     audio_out = gr.Audio(label="TTS", interactive=False)
                 result_box = gr.Textbox(label="Last action result", interactive=False)
 
-                gr.Markdown("### Controls")
+                gr.Markdown("### ⚙️ Controls")
                 with gr.Row():
                     btn_reset = gr.Button("🗑 Reset memory")
                     btn_seed = gr.Button("✨ Reload seed facts")
 
             with gr.Column(scale=3):
                 with gr.Tabs():
-                    with gr.Tab("Live log"):
+                    with gr.Tab("📋 Live log"):
                         live_box = gr.Textbox(value=render_log(), label="Events", lines=20, interactive=False, max_lines=50)
-                    with gr.Tab("Episodic memory (rolling 10 min)"):
+                    with gr.Tab("🧠 Episodic memory (rolling 10 min)"):
                         ep_box = gr.Textbox(value=render_episodic(), label="Recent transcripts", lines=20, interactive=False, max_lines=50)
-                    with gr.Tab("Semantic memory (what I've learned)"):
+                    with gr.Tab("💡 Semantic memory"):
                         sem_box = gr.Textbox(value=render_semantic(), label="Distilled facts", lines=20, interactive=False, max_lines=50)
-                    with gr.Tab("Calendar"):
+                    with gr.Tab("📅 Calendar"):
                         cal_box = gr.Textbox(value=render_calendar(), label="Booked events", lines=12, interactive=False)
 
         audio_in.stream(
@@ -656,5 +680,9 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=7860,
         show_error=True,
-        theme=gr.themes.Soft(),
+        theme=gr.themes.Soft(
+            primary_hue=gr.themes.colors.pink,
+            secondary_hue=gr.themes.colors.pink,
+            neutral_hue=gr.themes.colors.gray,
+        ),
     )
