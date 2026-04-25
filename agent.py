@@ -1,11 +1,14 @@
-"""Orchestrator — wires Whisper → Triage → Plan → Voice → Confirm → Sub-Agent.
+"""Orchestrator — wires Whisper → Triage → Plan → Sub-Agent → Voice (narration).
 
-Two execution modes:
-  - file mode: --input data/demo_script.wav  (chunks the WAV, runs through pipeline)
-  - server mode: starts a FastAPI shim that accepts audio chunks via POST /chunk
-                 and routes through the pipeline; used by app.py / Gradio.
+Flow:
+  - Triage classifies each transcript chunk: STORE | DISCARD | ACT.
+  - STORE: kick fact extractor in a background thread to promote noteworthy
+    items into long-term semantic memory.
+  - ACT: triage has already gated on mutual agreement, so we plan + execute
+    immediately, then narrate (past tense). No "may I?" round-trip.
+  - DISCARD: nothing.
 
-Fact extractor runs every 10 chunks, in a background thread.
+Fact extractor runs in a background thread on STORE.
 """
 from __future__ import annotations
 
@@ -23,27 +26,36 @@ from rich.console import Console
 import memory
 import transcription
 from agents import middleware, planner, voice_agent, sub_agent, fact_extractor
-from schema import TriageRoute, ConfirmIntent, TaskProposal
+from schema import TriageRoute, TaskProposal
 
 console = Console()
 
 # Throttle interjections to avoid annoying false positives.
 MIN_INTERJECT_GAP_S = 30.0
 _last_interject_at = 0.0
-_pending_confirmation: Optional[dict] = None
 
 # Files consumed by the laptop-side Tivoo relay (visual + audio).
 STATE_FILE = "/tmp/jarvis_state.txt"
 QUESTION_FILE = "/tmp/jarvis_question.txt"
 RESULT_FILE = "/tmp/jarvis_result.txt"
+TTS_MUTE_DURATION_S = 8.0  # drop mic input for this long after TTS fires
+
+_tts_started_at = 0.0
 
 
 def _write_state(state: str) -> None:
+    global _tts_started_at
     try:
         with open(STATE_FILE, "w") as f:
             f.write(state)
     except Exception:
         pass
+    if state in ("speaking", "booked"):
+        _tts_started_at = time.time()
+
+
+def is_tts_active() -> bool:
+    return (time.time() - _tts_started_at) < TTS_MUTE_DURATION_S
 
 
 def _write_question(question: str) -> None:
@@ -68,37 +80,12 @@ def _write_result(message: str) -> None:
 
 def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
     """Process one transcript chunk. Returns a status dict for UI/logging."""
-    global _last_interject_at, _pending_confirmation
+    global _last_interject_at
     now = time.time()
     if not text.strip():
         return {"action": "skip_empty"}
 
     _write_state("listening")
-    # If we're awaiting a yes/no confirmation, parse this chunk against that.
-    if _pending_confirmation:
-        question = _pending_confirmation["question"]
-        proposal: TaskProposal = _pending_confirmation["proposal"]
-        ci = voice_agent.parse_response(text, question)
-        console.log(f"[bold cyan]CONFIRM PARSE[/]: {ci.intent.value} mod={ci.modifier!r}")
-        if ci.intent == ConfirmIntent.YES:
-            result = sub_agent.execute(proposal)
-            console.log(f"[bold green]EXECUTED[/]: {result}")
-            _pending_confirmation = None
-            _write_state("booked")
-            _write_result(f"Done. {result.message}")
-            return {"action": "executed", "result": result.model_dump()}
-        if ci.intent == ConfirmIntent.NO:
-            sub_agent.execute_rejection(proposal)
-            console.log(f"[yellow]REJECTED[/]: {proposal.summary}")
-            _pending_confirmation = None
-            return {"action": "rejected"}
-        if ci.intent == ConfirmIntent.MODIFY:
-            sub_agent.execute_rejection(proposal, modifier=ci.modifier)
-            _pending_confirmation = None
-            # Fall through — re-plan with the modifier as a fresh chunk
-            text = f"User wants modification: {ci.modifier}. Originally: {proposal.summary}"
-        else:
-            return {"action": "unclear"}
 
     # Always buffer in episodic (rolling 10-min in-memory)
     memory.episodic_write(text, speaker=speaker)
@@ -114,18 +101,32 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
         console.log("[dim]STORE → fact extraction triggered[/]")
 
     elif decision.route == TriageRoute.ACT and (now - _last_interject_at) >= MIN_INTERJECT_GAP_S:
+        # Triage already gated on mutual agreement. Plan + execute + narrate.
         _write_state("thinking")
         recent = memory.episodic_recent(10)
         speakers = list({c.get("speaker") for c in recent if c.get("speaker") and c["speaker"] != "agent"})
         proposal = planner.plan(text, attendees_hint=speakers or None)
         console.log(f"[bold magenta]PLAN[/]: {proposal.task_type.value} — {proposal.summary}")
-        question = voice_agent.compose_question(proposal)
-        console.log(f"[bold blue]ASK[/]: {question}")
-        _pending_confirmation = {"proposal": proposal, "question": question, "asked_at": now}
+
+        # Execute first, then narrate the result
+        result = sub_agent.execute(proposal)
+        console.log(f"[bold green]EXECUTED[/]: {result}")
         _last_interject_at = now
+        _write_state("booked")
+
+        try:
+            narration = voice_agent.compose_narration(proposal, result)
+        except Exception as e:
+            console.log(f"[yellow]narration compose failed[/]: {e}")
+            narration = f"Done. {result.message}"
+        console.log(f"[bold blue]NARRATE[/]: {narration}")
         _write_state("speaking")
-        _write_question(question)
-        out.update({"proposal": proposal.model_dump(), "question": question})
+        _write_result(narration)
+        out.update({
+            "proposal": proposal.model_dump(),
+            "result": result.model_dump(),
+            "narration": narration,
+        })
 
     # DISCARD: nothing beyond the episodic buffer
 
@@ -160,7 +161,7 @@ def chunk_wav(path: str, chunk_seconds: float = 4.0):
 
 def run_file(path: str, fake_speakers: Optional[list[str]] = None) -> None:
     """Run the agent over a recorded WAV — alternates speakers if specified."""
-    speakers = fake_speakers or ["alex", "sam"]
+    speakers = fake_speakers or ["speaker_1", "speaker_2"]
     for idx, chunk in chunk_wav(path):
         console.rule(f"chunk {idx}")
         text = transcription.transcribe_bytes(chunk, filename=f"chunk_{idx}.wav")
@@ -207,11 +208,11 @@ def main() -> None:
     if args.input:
         run_file(args.input)
     elif args.text_script:
+        # Demonstrates mutual-agreement gating: first chunk should STORE only,
+        # second (with confirmation) should ACT → plan → execute → narrate.
         run_text([
-            ("alex", "Yo, we should grab drinks tonight."),
-            ("sam",  "Yeah! When are you free? Coffee earlier today wiped me out though."),
-            # planner should fire here
-            ("sam",  "Yeah that works"),  # confirm
+            ("alex", "Yo, want to grab drinks at 7:30 tonight near Fort Point?"),
+            ("sam",  "Yeah, sounds great, let's do it"),
         ])
     else:
         p.print_help()
