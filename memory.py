@@ -10,9 +10,6 @@ import time
 import logging
 from typing import List
 
-import chromadb
-from chromadb.utils import embedding_functions
-
 from config import (
     CHROMA_HOST, CHROMA_PORT,
     EPISODIC_TTL_SECONDS, EPISODIC_TOP_K, SEMANTIC_TOP_K,
@@ -21,19 +18,28 @@ from config import (
 
 log = logging.getLogger(__name__)
 
-_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name=EMBEDDING_MODEL
-)
+_ef = None  # lazy — only loads on Brev VM where torch/sentence-transformers are available
+
+
+def _get_ef():
+    global _ef
+    if _ef is None:
+        import chromadb as _chromadb  # noqa: F401
+        from chromadb.utils import embedding_functions as _ef_mod
+        _ef = _ef_mod.SentenceTransformerEmbeddingFunction(model_name=EMBEDDING_MODEL)
+    return _ef
 
 
 class MemoryStore:
     def __init__(self) -> None:
+        import chromadb
+        ef = _get_ef()
         self._client = chromadb.HttpClient(host=CHROMA_HOST, port=CHROMA_PORT)
         self._episodic = self._client.get_or_create_collection(
-            name="episodic_memory", embedding_function=_ef
+            name="episodic_memory", embedding_function=ef
         )
         self._semantic = self._client.get_or_create_collection(
-            name="semantic_memory", embedding_function=_ef
+            name="semantic_memory", embedding_function=ef
         )
         self._ep_counter = 0
 
