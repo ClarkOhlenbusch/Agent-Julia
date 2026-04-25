@@ -1,0 +1,51 @@
+# Secrets — NEVER commit
+*.token
+*token*
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+*hf_*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Audio / generated artifacts
+*.wav
+!data/demo_script.wav
+*.mp3
+*.flac
+*.opus
+
+# Chroma data
+chroma-data/
+*.sqlite3
+
+# Models (we never commit weights)
+/models/
+*.bin
+*.safetensors
+*.gguf
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
