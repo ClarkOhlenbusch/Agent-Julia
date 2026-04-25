@@ -25,7 +25,8 @@ tmux new-session -d -s $SESSION -n whisper
 tmux send-keys -t $SESSION:whisper "
 vllm serve $WHISPER \
     --port 9000 \
-    --gpu-memory-utilization 0.08 \
+    --gpu-memory-utilization 0.12 \
+    --max-num-seqs 4 \
     --served-model-name whisper-turbo \
     2>&1 | tee ~/vllm-whisper.log
 " C-m
