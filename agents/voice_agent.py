@@ -2,13 +2,12 @@
 
 Composes the natural-language line the assistant speaks aloud.
 
-Two modes:
-- compose_narration(proposal, result) — used after the agent has already acted on
-  detected mutual agreement. Past-tense confirmation. The default in the new flow.
-- compose_question(proposal) — used only when there's true ambiguity (multiple
-  recipients, unclear time). Kept around for future routing.
+The new pipeline uses Slack-shaped TaskProposal (recipients, content,
+voice_prompt) and ToolResult (success, message, dry_run). The narrator turns
+those into a short past-tense confirmation suitable for TTS.
 
-(parse_response is retained for code paths that still ask follow-up questions.)
+Older legacy schema (TaskProposal with task_type/parameters/summary/rationale)
+is no longer present in schema.py — the helpers below detect either shape.
 """
 from __future__ import annotations
 
@@ -19,7 +18,7 @@ from typing import Optional
 import httpx
 
 import observability
-from schema import ConfirmationIntent, ConfirmIntent, TaskProposal, TaskResult
+from schema import TaskProposal, ToolResult
 
 VOICE_ENDPOINT = os.getenv("VOICE_ENDPOINT", os.getenv("PLANNER_ENDPOINT", "http://localhost:9002/v1"))
 VOICE_MODEL = os.getenv("VOICE_MODEL", os.getenv("PLANNER_MODEL", "planner"))
@@ -75,10 +74,9 @@ Output JSON ONLY: {"intent": "YES"|"NO"|"MODIFY"|"UNCLEAR", "modifier": null|"st
 def compose_question(proposal: TaskProposal) -> str:
     user_msg = (
         f"TaskProposal:\n"
-        f"  task_type: {proposal.task_type.value}\n"
-        f"  summary:   {proposal.summary}\n"
-        f"  rationale: {proposal.rationale}\n"
-        f"  params:    {json.dumps(proposal.parameters)}\n\n"
+        f"  content:      {proposal.content}\n"
+        f"  voice_prompt: {proposal.voice_prompt}\n"
+        f"  recipients:   {proposal.recipients}\n\n"
         f"Compose the question:"
     )
     payload = {
@@ -97,19 +95,24 @@ def compose_question(proposal: TaskProposal) -> str:
 
 
 @observability.agent(name="voice_narration")
-def compose_narration(proposal: TaskProposal, result: Optional[TaskResult] = None) -> str:
-    """Past-tense confirmation, used after the agent has already acted."""
+def compose_narration_for_slack(proposal: TaskProposal,
+                                result: Optional[ToolResult] = None) -> str:
+    """Past-tense confirmation about a Slack post that just happened."""
     result_block = ""
     if result is not None:
-        result_block = f"  result_status: {result.status}\n  result_message: {result.message}\n"
+        status_word = "posted" if result.success else "failed"
+        result_block = (
+            f"  result_status: {status_word}\n"
+            f"  result_message: {result.message}\n"
+            f"  dry_run: {result.dry_run}\n"
+        )
     user_msg = (
-        f"TaskProposal:\n"
-        f"  task_type: {proposal.task_type.value}\n"
-        f"  summary:   {proposal.summary}\n"
-        f"  rationale: {proposal.rationale}\n"
-        f"  params:    {json.dumps(proposal.parameters)}\n"
+        f"Slack action just executed:\n"
+        f"  posted_content: {proposal.content}\n"
+        f"  voice_prompt:   {proposal.voice_prompt}\n"
+        f"  recipients:     {proposal.recipients}\n"
         f"{result_block}"
-        f"\nThe action has already been executed. Compose the narration:"
+        f"\nCompose the narration:"
     )
     payload = {
         "model": VOICE_MODEL,
@@ -126,47 +129,13 @@ def compose_narration(proposal: TaskProposal, result: Optional[TaskResult] = Non
     return r.json()["choices"][0]["message"]["content"].strip().strip('"')
 
 
-@observability.task(name="parse_response")
-def parse_response(user_utterance: str, original_question: str) -> ConfirmationIntent:
-    user_msg = (
-        f"Question I asked: {original_question!r}\n"
-        f"User's response:  {user_utterance!r}\n\n"
-        f"Classify:"
-    )
-    payload = {
-        "model": VOICE_MODEL,
-        "messages": [
-            {"role": "system", "content": PARSE_SYSTEM},
-            {"role": "user", "content": user_msg},
-        ],
-        "temperature": 0.0,
-        "max_tokens": 80,
-        "response_format": {"type": "json_object"},
-    }
-    with httpx.Client(timeout=10) as c:
-        r = c.post(f"{VOICE_ENDPOINT}/chat/completions", json=payload)
-    r.raise_for_status()
-    raw = r.json()["choices"][0]["message"]["content"]
-    try:
-        data = json.loads(raw)
-        return ConfirmationIntent(
-            intent=ConfirmIntent(data["intent"]),
-            modifier=data.get("modifier"),
-        )
-    except Exception:
-        return ConfirmationIntent(intent=ConfirmIntent.UNCLEAR, modifier=None)
-
-
 if __name__ == "__main__":
-    from schema import TaskProposal, TaskType, TaskResult
+    from schema import TaskProposal, ToolResult
     p = TaskProposal(
-        task_type=TaskType.CREATE_CALENDAR_EVENT,
-        summary="Drinks tonight at 7:30 with Alex and Sam at The Black Rose",
-        parameters={"title": "Drinks", "start": "2026-04-25T19:30:00-04:00",
-                    "end": "2026-04-25T20:30:00-04:00", "attendees": ["alex", "sam"]},
-        rationale="Both confirmed 7:30 works after agreeing in the conversation.",
+        recipients=[],
+        content="Drinks at The Black Rose, 7:30 PM tonight with Alex and Sam.",
+        voice_prompt="Should I post tonight's drinks plan to the channel?",
     )
-    r = TaskResult(status="booked", message="Drinks with Alex and Sam at 7:30 PM",
-                   artifact_id="cal_demo123")
-    print(f"NARRATION: {compose_narration(p, r)!r}")
-    print(f"QUESTION:  {compose_question(p)!r}")
+    r = ToolResult(success=True, message="posted to #huddle", dry_run=False)
+    print("NARRATION:", compose_narration_for_slack(p, r))
+    print("QUESTION: ", compose_question(p))

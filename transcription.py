@@ -15,10 +15,14 @@ import os
 
 import httpx
 import numpy as np
-import sounddevice as sd
 import scipy.io.wavfile as wav_io
 
 from config import WHISPER_BASE_URL, WHISPER_MODEL
+
+# sounddevice is only needed for live mic capture (laptop side). The Brev VM
+# may not have PortAudio installed; defer import until capture_and_transcribe
+# is actually invoked.
+sd = None  # type: ignore[assignment]
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +55,11 @@ async def capture_and_transcribe(callback, stop_event: asyncio.Event) -> None:
     Continuously capture mic audio until stop_event is set.
     For each non-silent chunk, transcribes and calls await callback(text).
     """
+    global sd
+    if sd is None:
+        import sounddevice as _sd  # imported here so headless boxes don't crash on module import
+        sd = _sd
+
     loop       = asyncio.get_event_loop()
     audio_queue: asyncio.Queue = asyncio.Queue()
 

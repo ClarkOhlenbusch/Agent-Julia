@@ -11,9 +11,11 @@ AGENT_BASE_URL   = f"http://{_VLLM_HOST}:9002/v1"
 CHROMA_HOST = os.environ.get("CHROMA_HOST", "localhost")
 CHROMA_PORT = int(os.environ.get("CHROMA_PORT", "8001"))
 
-WHISPER_MODEL = "openai/whisper-large-v3-turbo"
-TRIAGE_MODEL  = "RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8"
-AGENT_MODEL   = "RedHatAI/Mistral-Small-3.2-24B-Instruct-2506-FP8"
+# vLLM is started with --served-model-name {whisper-turbo|triage|planner};
+# call by served name, not the HF repo path.
+WHISPER_MODEL = os.environ.get("WHISPER_MODEL", "whisper-turbo")
+TRIAGE_MODEL  = os.environ.get("TRIAGE_MODEL", "triage")
+AGENT_MODEL   = os.environ.get("AGENT_MODEL", "planner")
 
 TIVOO_IP   = os.environ.get("TIVOO_IP", "192.168.1.100")
 TIVOO_PORT = 80
