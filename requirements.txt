@@ -17,3 +17,8 @@ rich>=13.7
 piper-tts>=1.2; platform_machine != "aarch64"
 ddtrace==4.7.1
 python-dotenv==1.2.2
+
+# Slack huddle integration (added by feature/execution-layer)
+slack-bolt>=1.18.0
+sounddevice>=0.4.6
+scipy>=1.13.0
