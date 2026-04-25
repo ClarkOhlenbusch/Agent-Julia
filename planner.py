@@ -16,23 +16,11 @@ log = logging.getLogger(__name__)
 
 _client = AsyncOpenAI(base_url=AGENT_BASE_URL, api_key="vllm")
 
-_PROPOSAL_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "recipients":   {"type": "array", "items": {"type": "string"}},
-        "content":      {"type": "string"},
-        "voice_prompt": {"type": "string"},
-    },
-    "required": ["recipients", "content", "voice_prompt"],
-    "additionalProperties": False,
-}
-
 _SYSTEM = """You are Julia's planning agent. Scheduling intent has been detected in a Slack huddle.
-Your job is to draft a Slack message that captures the key information and posts it to the channel.
+Draft a Slack message that captures the key information.
 
-content: the Slack message Julia will post (clear, friendly, includes the key details — who, what, when).
-voice_prompt: a short question Julia asks before posting, e.g. "Should I post a message about tonight's drinks?"
-recipients: leave as an empty list — Julia will post to the huddle channel automatically."""
+Respond ONLY with valid JSON:
+{"recipients": [], "content": "<the Slack message Julia will post — clear, friendly, includes who/what/when>", "voice_prompt": "<short question Julia asks before posting, e.g. Should I post a message about tonight drinks?>"}"""
 
 _USER_TMPL = """{context}
 
@@ -52,7 +40,7 @@ async def plan(transcript: str, context: str = "") -> TaskProposal:
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user",   "content": prompt},
             ],
-            extra_body={"guided_json": _PROPOSAL_SCHEMA},
+            response_format={"type": "json_object"},
             max_tokens=300,
             temperature=0.2,
         )

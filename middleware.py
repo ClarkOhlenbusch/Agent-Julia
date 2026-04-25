@@ -19,28 +19,19 @@ log = logging.getLogger(__name__)
 
 _client = AsyncOpenAI(base_url=TRIAGE_BASE_URL, api_key="vllm")
 
-_TRIAGE_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "action": {"type": "string", "enum": ["STORE", "DISCARD", "ACT"]},
-        "reason": {"type": "string"},
-    },
-    "required": ["action", "reason"],
-    "additionalProperties": False,
-}
-
 _SYSTEM = """You are the triage agent for Julia, a proactive scheduling assistant listening to a Slack huddle.
 
-Given a transcript chunk and conversation context, decide:
+Given a transcript chunk, decide:
 
-ACT   — clear scheduling intent: someone wants to book a meeting, send a message, create an invite, or follow up via email.
+ACT   — clear scheduling intent: someone wants to book a meeting, send a message, set up a call, or coordinate plans.
 STORE — relevant context (names, times, preferences) but no immediate action needed.
 DISCARD — small talk, filler words, or nothing actionable.
 
 Rules:
 - Only choose ACT when intent is explicit and actionable right now.
-- One ACT per 30 seconds maximum — do not spam.
-- If unsure, choose STORE."""
+- If unsure, choose STORE.
+
+Respond ONLY with valid JSON: {"action": "ACT" or "STORE" or "DISCARD", "reason": "<short reason>"}"""
 
 _last_act_time: float = 0.0
 
@@ -59,7 +50,7 @@ async def triage(transcript: str, context: str = "") -> TriageDecision:
                 {"role": "system", "content": _SYSTEM},
                 {"role": "user",   "content": prompt},
             ],
-            extra_body={"guided_json": _TRIAGE_SCHEMA},
+            response_format={"type": "json_object"},
             max_tokens=120,
             temperature=0.1,
         )
