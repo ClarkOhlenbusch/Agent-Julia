@@ -3,7 +3,8 @@
 > **TOA vLLM/LLM-D Hackathon · April 25, 2026 · Boston**
 > **Track 5 — Efficient Agentic Edge powered by NemoClaw** 
 
-<img width="2500" height="2000" alt="image" src="https://github.com/user-attachments/assets/6c315a32-c6d5-42a7-b56a-03fd97ed55d0" />
+<img width="500" alt="image" src="https://github.com/user-attachments/assets/76dc176b-9396-4366-839c-bff6fb057218" />
+
 
 ---
 
