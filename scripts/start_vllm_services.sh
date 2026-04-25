@@ -21,13 +21,11 @@ SESSION=jarvis-vllm
 tmux kill-session -t $SESSION 2>/dev/null || true
 tmux new-session -d -s $SESSION -n whisper
 
-# Pane 0: Whisper transcription
+# Pane 0: Whisper transcription (vLLM auto-detects model type from config)
 tmux send-keys -t $SESSION:whisper "
 vllm serve $WHISPER \
     --port 9000 \
-    --task transcription \
     --gpu-memory-utilization 0.08 \
-    --max-model-len 448 \
     --served-model-name whisper-turbo \
     2>&1 | tee ~/vllm-whisper.log
 " C-m

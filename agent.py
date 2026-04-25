@@ -33,6 +33,17 @@ _last_interject_at = 0.0
 _chunks_since_extract = 0
 _pending_confirmation: Optional[dict] = None
 
+# State file consumed by the laptop-side Tivoo relay.
+STATE_FILE = "/tmp/jarvis_state.txt"
+
+
+def _write_state(state: str) -> None:
+    try:
+        with open(STATE_FILE, "w") as f:
+            f.write(state)
+    except Exception:
+        pass
+
 
 def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
     """Process one transcript chunk. Returns a status dict for UI/logging."""
@@ -41,6 +52,7 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
     if not text.strip():
         return {"action": "skip_empty"}
 
+    _write_state("listening")
     # If we're awaiting a yes/no confirmation, parse this chunk against that.
     if _pending_confirmation:
         question = _pending_confirmation["question"]
@@ -51,6 +63,7 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
             result = sub_agent.execute(proposal)
             console.log(f"[bold green]EXECUTED[/]: {result}")
             _pending_confirmation = None
+            _write_state("booked")
             return {"action": "executed", "result": result.model_dump()}
         if ci.intent == ConfirmIntent.NO:
             sub_agent.execute_rejection(proposal)
@@ -75,6 +88,7 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
     out = {"action": decision.route.value.lower(), "decision": decision.model_dump()}
 
     if decision.route == TriageRoute.ACT and (now - _last_interject_at) >= MIN_INTERJECT_GAP_S:
+        _write_state("thinking")
         # Determine likely attendees from recent speakers
         recent = memory.episodic_recent(10)
         speakers = list({c.get("speaker") for c in recent if c.get("speaker") and c["speaker"] != "agent"})
@@ -84,6 +98,7 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
         console.log(f"[bold blue]ASK[/]: {question}")
         _pending_confirmation = {"proposal": proposal, "question": question, "asked_at": now}
         _last_interject_at = now
+        _write_state("speaking")
         out.update({"proposal": proposal.model_dump(), "question": question})
 
     # Periodic fact extraction

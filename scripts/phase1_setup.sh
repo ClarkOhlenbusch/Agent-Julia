@@ -3,6 +3,8 @@
 # Run on the Brev box (jarvis-track5). Writes progress to ~/setup.log.
 
 set -euo pipefail
+export PATH="$HOME/.local/bin:$PATH"
+grep -q "HOME/.local/bin" ~/.bashrc || echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 exec > >(tee -a ~/setup.log) 2>&1
 
 START=$(date +%s)
