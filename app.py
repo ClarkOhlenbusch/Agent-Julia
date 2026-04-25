@@ -73,16 +73,21 @@ def render_calendar() -> str:
 def on_audio(file_path: str | None, speaker: str):
     global _LAST_QUESTION, _LAST_RESULT
     if not file_path:
+        log("[audio] no file_path received — did you click STOP on the mic before pressing Process?")
         return render_log(), render_episodic(), render_semantic(), _LAST_QUESTION, _LAST_RESULT
     try:
         with open(file_path, "rb") as f:
             audio_bytes = f.read()
+        log(f"[audio] received {len(audio_bytes)} bytes from {file_path}")
+        if len(audio_bytes) < 1024:
+            log(f"[audio] file too small ({len(audio_bytes)} bytes) — likely empty recording")
+            return render_log(), render_episodic(), render_semantic(), _LAST_QUESTION, _LAST_RESULT
         text = transcription.transcribe_bytes(audio_bytes, filename=os.path.basename(file_path))
     except Exception as e:
         log(f"[transcribe error] {e}")
         return render_log(), render_episodic(), render_semantic(), _LAST_QUESTION, _LAST_RESULT
     if not text.strip():
-        log(f"(silence)")
+        log(f"[audio] whisper returned empty — was the audio audible?")
         return render_log(), render_episodic(), render_semantic(), _LAST_QUESTION, _LAST_RESULT
     log(f"[{speaker}] {text}")
     out = agent.handle_chunk(text, speaker=speaker)
