@@ -33,14 +33,36 @@ _last_interject_at = 0.0
 _chunks_since_extract = 0
 _pending_confirmation: Optional[dict] = None
 
-# State file consumed by the laptop-side Tivoo relay.
+# Files consumed by the laptop-side Tivoo relay (visual + audio).
 STATE_FILE = "/tmp/jarvis_state.txt"
+QUESTION_FILE = "/tmp/jarvis_question.txt"
+RESULT_FILE = "/tmp/jarvis_result.txt"
 
 
 def _write_state(state: str) -> None:
     try:
         with open(STATE_FILE, "w") as f:
             f.write(state)
+    except Exception:
+        pass
+
+
+def _write_question(question: str) -> None:
+    """Stamps a fresh interjection question for the laptop voice relay to TTS."""
+    try:
+        import time as _t
+        with open(QUESTION_FILE, "w") as f:
+            f.write(f"{_t.time():.0f}\t{question}")
+    except Exception:
+        pass
+
+
+def _write_result(message: str) -> None:
+    """Stamps an executed-action confirmation for the laptop voice relay to TTS."""
+    try:
+        import time as _t
+        with open(RESULT_FILE, "w") as f:
+            f.write(f"{_t.time():.0f}\t{message}")
     except Exception:
         pass
 
@@ -64,6 +86,7 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
             console.log(f"[bold green]EXECUTED[/]: {result}")
             _pending_confirmation = None
             _write_state("booked")
+            _write_result(f"Done. {result.message}")
             return {"action": "executed", "result": result.model_dump()}
         if ci.intent == ConfirmIntent.NO:
             sub_agent.execute_rejection(proposal)
@@ -99,6 +122,7 @@ def handle_chunk(text: str, speaker: Optional[str] = None) -> dict:
         _pending_confirmation = {"proposal": proposal, "question": question, "asked_at": now}
         _last_interject_at = now
         _write_state("speaking")
+        _write_question(question)
         out.update({"proposal": proposal.model_dump(), "question": question})
 
     # Periodic fact extraction
